@@ -63,8 +63,8 @@ pub trait Nimbus {
 mod tests {
     use super::*;
 
-    /// The daemon uses the blocking proxy. The tray uses the async proxy. This
-    /// test stops compiling if a zbus upgrade removes either type.
+    /// The daemon and the tray both use the blocking proxy. This test stops
+    /// compiling if a zbus upgrade removes either type.
     #[test]
     fn both_proxies_exist() {
         fn names(_: Option<NimbusProxy<'_>>, _: Option<NimbusProxyBlocking<'_>>) {}

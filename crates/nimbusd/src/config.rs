@@ -13,8 +13,11 @@ pub struct Config {
     pub local: PathBuf,
     /// A run that is active finishes. Later runs wait for a resume.
     pub paused: bool,
+    /// The longest gap between two runs. The time counts from the end of the
+    /// last run, so a slow run does not shorten the gap.
     pub interval_secs: u64,
-    /// The daemon starts a run when no change arrives for this many seconds.
+    /// The quiet time after the last file change. A run starts when no change
+    /// arrives for this many seconds.
     pub debounce_secs: u64,
     /// The next run uses the rclone flag --resync. The flag clears only after
     /// a run that ends without an error.
