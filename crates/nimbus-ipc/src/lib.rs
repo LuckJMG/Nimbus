@@ -1,14 +1,11 @@
 //! The D-Bus contract between the Nimbus daemon and its clients.
-//!
-//! This crate holds no logic. It holds the names, the types, and the
-//! signatures that the daemon and the clients agree on.
 
 use serde::{Deserialize, Serialize};
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Type, Value};
 
-// The macro attributes below need literals, so these three constants and
-// those three literals must stay in step. A rename touches this file only.
+// The macro attributes below take literals, so these constants and those
+// literals can drift apart.
 pub const BUS_NAME: &str = "io.github.luckjmg.nimbus";
 pub const OBJECT_PATH: &str = "/io/github/luckjmg/nimbus";
 pub const INTERFACE: &str = "io.github.luckjmg.nimbus1";
@@ -16,8 +13,8 @@ pub const INTERFACE: &str = "io.github.luckjmg.nimbus1";
 /// The phase of the sync engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
 #[serde(rename_all = "lowercase")]
-// The signature attribute is required. Without it the derive casts the enum
-// to u32 instead of sending a string over the bus.
+// Required. Without it the derive casts the enum to u32 rather than sending
+// a string.
 #[zvariant(signature = "s", rename_all = "lowercase")]
 pub enum Phase {
     Idle,
@@ -26,7 +23,7 @@ pub enum Phase {
     Error,
 }
 
-/// The full state of the daemon. The clients read this and nothing else.
+/// The full state of the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, OwnedValue)]
 pub struct State {
     pub phase: Phase,
@@ -50,16 +47,13 @@ pub trait Nimbus {
     /// Stop after the current run, and skip every run until unpaused.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
 
-    // There is no SetMode method. The daemon runs rclone bisync and nothing
-    // else. Adding a method later is a pure addition on the bus, so the
-    // interface version stays at 1.
+    // No SetMode method. The daemon runs rclone bisync and nothing else.
 
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
 
-    // The signal is named Changed, not StateChanged. A property called
-    // State already generates receive_state_changed, and a signal called
-    // StateChanged would generate that same name a second time.
+    // Named Changed because a State property already generates
+    // receive_state_changed, and StateChanged would collide with it.
     #[zbus(signal)]
     fn changed(&self, state: State) -> zbus::Result<()>;
 }
@@ -68,17 +62,16 @@ pub trait Nimbus {
 mod tests {
     use super::*;
 
-    /// The daemon uses the blocking proxy and the tray uses the async one.
-    /// This test stops compiling if a zbus upgrade drops either of them.
+    /// The daemon uses the blocking proxy, the tray uses the async one.
+    /// This stops compiling if a zbus upgrade drops either of them.
     #[test]
     fn both_proxies_exist() {
         fn names(_: Option<NimbusProxy<'_>>, _: Option<NimbusProxyBlocking<'_>>) {}
         let _ = names;
     }
 
-    /// The daemon emits the Changed signal by hand, so a field reorder here
-    /// would break every client at runtime with no compile error. This test
-    /// is the only thing that catches it.
+    /// The daemon emits Changed by hand, so a field reorder here would break
+    /// every client at runtime with no compile error.
     #[test]
     fn state_signature_is_stable() {
         assert_eq!(State::SIGNATURE, "(sdts)");
