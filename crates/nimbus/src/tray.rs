@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use nimbus_ipc::{Phase, State};
@@ -7,6 +8,14 @@ use nimbus_ipc::{Phase, State};
 const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-sync.svg";
 const ICON: &str = "nimbus-sync";
 const FALLBACK: &str = "folder-sync";
+
+/// What a menu item asks the main loop to do. The menu callback must not block,
+/// so it only sends on a channel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Action {
+    SyncNow,
+    SetPaused(bool),
+}
 
 /// What the tray shows. The daemon may not run, so the state is optional.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,9 +59,18 @@ pub fn pick(source: bool, installed: bool) -> Icon {
     }
 }
 
-/// Builds the tooltip for the panel.
-pub fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
-    let description = match view {
+pub fn is_paused(view: &View) -> bool {
+    matches!(view, View::Ready(state) if state.phase == Phase::Paused)
+}
+
+pub fn is_syncing(view: &View) -> bool {
+    matches!(view, View::Ready(state) if state.phase == Phase::Syncing)
+}
+
+/// The full state text, for the tooltip. The tooltip has room for the error
+/// message from the daemon.
+pub fn status_text(view: &View) -> String {
+    match view {
         View::Offline => String::from("The daemon is not running"),
         View::Ready(state) => match state.phase {
             Phase::Idle => String::from("Idle"),
@@ -61,12 +79,28 @@ pub fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
             Phase::Error if state.last_error.is_empty() => String::from("The last run failed"),
             Phase::Error => state.last_error.clone(),
         },
-    };
+    }
+}
+
+/// The short state name, for the menu header. A menu row has no room for the
+/// error message, and the tooltip carries it.
+pub fn status_name(view: &View) -> String {
+    match view {
+        View::Offline => String::from("The daemon is not running"),
+        View::Ready(state) => match state.phase {
+            Phase::Error => String::from("Error"),
+            _ => status_text(view),
+        },
+    }
+}
+
+/// Builds the tooltip for the panel.
+pub fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
     ksni::ToolTip {
         icon_name: String::from(icon),
         icon_pixmap: Vec::new(),
         title: String::from("Nimbus"),
-        description,
+        description: status_text(view),
     }
 }
 
@@ -82,11 +116,16 @@ pub fn overlay(view: &View) -> String {
 pub struct NimbusTray {
     view: Arc<Mutex<View>>,
     icon: Icon,
+    actions: Sender<Action>,
 }
 
 impl NimbusTray {
-    pub fn new(view: Arc<Mutex<View>>, icon: Icon) -> Self {
-        Self { view, icon }
+    pub fn new(view: Arc<Mutex<View>>, icon: Icon, actions: Sender<Action>) -> Self {
+        Self {
+            view,
+            icon,
+            actions,
+        }
     }
 
     fn current(&self) -> View {
@@ -96,7 +135,7 @@ impl NimbusTray {
 
 impl ksni::Tray for NimbusTray {
     fn id(&self) -> String {
-        String::from("nimbus")
+        String::from("Nimbus")
     }
 
     fn title(&self) -> String {
@@ -128,6 +167,51 @@ impl ksni::Tray for NimbusTray {
     fn overlay_icon_name(&self) -> String {
         overlay(&self.current())
     }
+
+    /// Builds the menu. The host redraws it after every update, so the state
+    /// here needs no separate refresh path.
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
+        let view = self.current();
+        let sync_actions = self.actions.clone();
+        let pause_actions = self.actions.clone();
+        vec![
+            MenuItem::Standard(StandardItem {
+                label: status_name(&view),
+                enabled: false,
+                ..Default::default()
+            }),
+            MenuItem::Separator,
+            MenuItem::Standard(StandardItem {
+                label: String::from("Sync now"),
+                // The engine drops a request while a run is active, so a
+                // click on an enabled item would look broken.
+                enabled: !is_syncing(&view),
+                activate: Box::new(move |_: &mut Self| {
+                    let _ = sync_actions.send(Action::SyncNow);
+                }),
+                ..Default::default()
+            }),
+            MenuItem::Checkmark(CheckmarkItem {
+                label: String::from("Pause"),
+                // The view is the only record of the pause state. A cached
+                // flag would show a tick the daemon never confirmed.
+                checked: is_paused(&view),
+                activate: Box::new(move |this: &mut Self| {
+                    let next = !is_paused(&this.current());
+                    let _ = pause_actions.send(Action::SetPaused(next));
+                }),
+                ..Default::default()
+            }),
+            MenuItem::Separator,
+            MenuItem::Standard(StandardItem {
+                label: String::from("Quit"),
+                icon_name: String::from("application-exit"),
+                activate: Box::new(|_| std::process::exit(0)),
+                ..Default::default()
+            }),
+        ]
+    }
 }
 
 /// The icon directory in the source tree, so `cargo run -p nimbus` shows the
@@ -155,6 +239,10 @@ fn installed() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use ksni::Tray;
+
     use super::*;
 
     fn ready(phase: Phase, last_error: &str) -> View {
@@ -164,6 +252,24 @@ mod tests {
             last_run: 0,
             last_error: String::from(last_error),
         })
+    }
+
+    fn tray(view: View) -> NimbusTray {
+        let (tx, _rx) = mpsc::channel();
+        NimbusTray::new(Arc::new(Mutex::new(view)), pick(true, false), tx)
+    }
+
+    fn labels(menu: &[ksni::MenuItem<NimbusTray>]) -> Vec<String> {
+        use ksni::MenuItem;
+        menu.iter()
+            .map(|item| match item {
+                MenuItem::Standard(item) => item.label.clone(),
+                MenuItem::Checkmark(item) => item.label.clone(),
+                MenuItem::SubMenu(item) => item.label.clone(),
+                MenuItem::RadioGroup(_) => String::from("a radio group"),
+                MenuItem::Separator => String::from("a separator"),
+            })
+            .collect()
     }
 
     #[test]
@@ -251,5 +357,84 @@ mod tests {
         assert_eq!(overlay(&ready(Phase::Syncing, "")), "");
         assert_eq!(overlay(&ready(Phase::Paused, "")), "");
         assert_eq!(overlay(&View::Offline), "");
+    }
+
+    #[test]
+    fn the_pause_state_comes_from_the_view() {
+        assert!(is_paused(&ready(Phase::Paused, "")));
+        assert!(!is_paused(&ready(Phase::Idle, "")));
+        assert!(!is_paused(&View::Offline), "a missing daemon is not paused");
+    }
+
+    #[test]
+    fn the_sync_state_comes_from_the_view() {
+        assert!(is_syncing(&ready(Phase::Syncing, "")));
+        assert!(!is_syncing(&ready(Phase::Idle, "")));
+        assert!(!is_syncing(&View::Offline));
+    }
+
+    #[test]
+    fn the_menu_header_shortens_the_error() {
+        assert_eq!(status_name(&ready(Phase::Error, "Bisync aborted")), "Error");
+        assert_eq!(
+            status_text(&ready(Phase::Error, "Bisync aborted")),
+            "Bisync aborted"
+        );
+    }
+
+    #[test]
+    fn the_menu_lists_the_items_in_order() {
+        let menu = tray(View::Offline).menu();
+        assert_eq!(
+            labels(&menu),
+            [
+                "The daemon is not running",
+                "a separator",
+                "Sync now",
+                "Pause",
+                "a separator",
+                "Quit",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_menu_header_is_not_clickable() {
+        use ksni::MenuItem;
+        let menu = tray(View::Offline).menu();
+        let MenuItem::Standard(header) = &menu[0] else {
+            panic!("the first item is the status line");
+        };
+        assert!(!header.enabled, "the status line must not swallow clicks");
+    }
+
+    #[test]
+    fn sync_now_is_disabled_while_syncing() {
+        use ksni::MenuItem;
+        let menu = tray(ready(Phase::Syncing, "")).menu();
+        let MenuItem::Standard(sync) = &menu[2] else {
+            panic!("the third item is Sync now");
+        };
+        assert!(!sync.enabled, "the engine drops a request during a run");
+        let menu = tray(ready(Phase::Idle, "")).menu();
+        let MenuItem::Standard(sync) = &menu[2] else {
+            panic!("the third item is Sync now");
+        };
+        assert!(sync.enabled);
+    }
+
+    #[test]
+    fn the_pause_checkmark_follows_the_view() {
+        use ksni::MenuItem;
+        let menu = tray(ready(Phase::Paused, "")).menu();
+        let MenuItem::Checkmark(pause) = &menu[3] else {
+            panic!("the fourth item is Pause");
+        };
+        assert!(pause.checked);
+        let menu = tray(ready(Phase::Idle, "")).menu();
+        let MenuItem::Checkmark(pause) = &menu[3] else {
+            panic!("the fourth item is Pause");
+        };
+        assert!(!pause.checked);
     }
 }
