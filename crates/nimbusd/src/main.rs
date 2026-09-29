@@ -12,7 +12,7 @@ use nimbusd::rclone;
 /// so the value only sets the slowest response to the quiet time.
 const TICK: Duration = Duration::from_secs(1);
 
-/// This function returns true when a file change must start a run.
+/// Returns true when a file change must start a run.
 ///
 /// The function drops read events on purpose. rclone reads the local folder
 /// during every run, so a read event would start the next run without end.

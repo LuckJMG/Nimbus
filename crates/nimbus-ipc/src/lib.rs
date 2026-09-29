@@ -43,11 +43,11 @@ pub struct State {
     default_path = "/io/github/luckjmg/nimbus"
 )]
 pub trait Nimbus {
-    /// This method starts a run now. The call returns before the run finishes.
+    /// Starts a run now. The call returns before the run finishes.
     fn sync_now(&self) -> zbus::Result<()>;
 
-    /// This method pauses the daemon. The current run finishes first. The
-    /// daemon skips all later runs until you call this method again.
+    /// Pauses the daemon. The current run finishes first. The daemon skips
+    /// all later runs until you call the method again.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
 
     // The interface has no SetMode method. The daemon runs rclone bisync.

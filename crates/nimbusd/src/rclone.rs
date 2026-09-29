@@ -15,9 +15,9 @@ const PROGRAM: &str = "rclone";
 /// leaves the list when the list is full.
 const TAIL: usize = 10;
 
-/// This function runs rclone once. The function blocks until the run ends, so
-/// the caller runs it on its own thread. The function reads the pause flag
-/// between output lines, and it stops the process within about one second.
+/// Runs rclone once. The function blocks until the run ends, so the caller
+/// runs it on its own thread. It reads the pause flag between output lines,
+/// and it stops the process within about one second.
 pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     let mut child = match command(cfg).spawn() {
         Ok(child) => child,
@@ -59,7 +59,7 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     });
 }
 
-/// This function builds the rclone command for one run. The daemon reads the
+/// Builds the rclone command for one run. The daemon reads the
 /// error output from the process, and it discards the standard output.
 pub fn command(cfg: &Config) -> Command {
     let mut cmd = Command::new(PROGRAM);
@@ -78,9 +78,8 @@ pub fn command(cfg: &Config) -> Command {
     cmd
 }
 
-/// This function reads the ratio from one rclone stats line. The ratio is a
-/// value from 0.0 to 1.0. The function returns nothing when the line does not
-/// report a percentage.
+/// Reads the ratio from one rclone stats line. The ratio is a value from 0.0
+/// to 1.0. Returns nothing when the line has no percentage.
 pub fn parse_progress(line: &str) -> Option<f64> {
     let rest = line.strip_prefix("Transferred:")?;
     let (left, _) = rest.split_once("%, ")?;
@@ -91,8 +90,8 @@ pub fn parse_progress(line: &str) -> Option<f64> {
         .map(|percent| percent / 100.0)
 }
 
-/// This function reads the error text from one rclone log line. The function
-/// returns nothing when the line does not report an error.
+/// Reads the error text from one rclone log line. Returns nothing when the
+/// line has no error.
 pub fn parse_error(line: &str) -> Option<String> {
     let (_, rest) = line.split_once("ERROR : ")?;
     let clean = strip_ansi(rest);

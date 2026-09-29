@@ -37,13 +37,13 @@ impl Default for Config {
 }
 
 impl Config {
-    /// This function builds the rclone target, in the form remote:path.
+    /// Builds the rclone target, in the form remote:path.
     pub fn remote_path(&self) -> String {
         format!("{}:{}", self.remote, self.path)
     }
 
-    /// This function rejects settings that the daemon cannot use. The first
-    /// error stops the function.
+    /// Rejects settings that the daemon cannot use. The function returns the
+    /// first error.
     pub fn check(&self) -> Result<()> {
         ensure!(
             !self.remote.is_empty(),
@@ -70,26 +70,26 @@ impl Config {
     }
 }
 
-/// This function builds the path of the config file for one base directory.
-/// A test calls this function with a temporary directory.
+/// Builds the path of the config file for one base directory. A test passes
+/// a temporary directory.
 pub fn path_in(base: &Path) -> PathBuf {
     base.join("nimbus").join("config.toml")
 }
 
-/// This function returns the path of the config file. The daemon prints the
+/// Returns the path of the config file. The daemon prints the
 /// path when it cannot use the settings.
 pub fn path() -> PathBuf {
     path_in(&config_home())
 }
 
-/// This function reads the config file. The daemon writes a new file when the
+/// Reads the config file. The daemon writes a new file when the
 /// file does not exist.
 pub fn load() -> Result<Config> {
     load_from(&path_in(&config_home()))
 }
 
-/// This function reads the config file from a known path. A test calls this
-/// function with a temporary path.
+/// Reads the config file from a known path. A test passes a temporary
+/// path.
 pub fn load_from(file: &Path) -> Result<Config> {
     if !file.exists() {
         let mut cfg = Config::default();
@@ -108,13 +108,13 @@ pub fn load_from(file: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
-/// This function writes the config file.
+/// Writes the config file.
 pub fn save(cfg: &Config) -> Result<()> {
     save_to(cfg, &path_in(&config_home()))
 }
 
-/// This function writes the config file to a known path. A test calls this
-/// function with a temporary path.
+/// Writes the config file to a known path. A test passes a temporary
+/// path.
 pub fn save_to(cfg: &Config, file: &Path) -> Result<()> {
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)
@@ -126,8 +126,8 @@ pub fn save_to(cfg: &Config, file: &Path) -> Result<()> {
         .with_context(|| format!("the daemon cannot write {}", file.display()))
 }
 
-/// This function replaces a leading ~ with the value of the home directory.
-/// The function returns the path as it is when HOME is not set.
+/// Replaces a leading ~ with the value of the home directory. The path stays
+/// as it is when HOME is not set.
 pub fn expand_tilde(raw: &Path) -> PathBuf {
     let Some(text) = raw.to_str() else {
         return raw.to_path_buf();

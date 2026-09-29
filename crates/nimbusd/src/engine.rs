@@ -50,7 +50,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// This function builds the engine. The first state follows the config.
+    /// Builds the engine. The first state follows the config.
     pub fn new(cfg: Config) -> Self {
         let pause = Arc::new(AtomicBool::new(cfg.paused));
         let phase = if cfg.paused {
@@ -76,23 +76,23 @@ impl Engine {
         }
     }
 
-    /// This function returns the settings of the daemon.
+    /// Returns the settings of the daemon.
     pub fn config(&self) -> &Config {
         &self.cfg
     }
 
-    /// This function returns the state of the daemon.
+    /// Returns the state of the daemon.
     pub fn snapshot(&self) -> &State {
         &self.state
     }
 
-    /// This function returns a flag for the run threads. The engine sets the
+    /// Returns a flag for the run threads. The engine sets the
     /// flag when the user pauses.
     pub fn pause_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.pause)
     }
 
-    /// This function applies one message. The caller supplies both clocks, so
+    /// Applies one message. The caller supplies both clocks, so
     /// a test can choose the time.
     pub fn on_event(&mut self, event: Event, now: Instant, unix: u64) {
         match event {
@@ -104,8 +104,8 @@ impl Engine {
         }
     }
 
-    /// This function returns true when the daemon must start a run. The
-    /// function marks the engine as busy, so one turn starts at most one run.
+    /// Returns true when the daemon must start a run. The engine stays busy
+    /// afterwards, so one turn starts at most one run.
     pub fn wants_run(&mut self, now: Instant) -> bool {
         if self.running || self.cfg.paused {
             return false;
@@ -133,8 +133,8 @@ impl Engine {
         true
     }
 
-    /// This function returns true when the daemon must write the config file.
-    /// This function clears the flag, so the daemon writes the file once.
+    /// Returns true when the daemon must write the config file. The function
+    /// clears the flag, so the daemon writes the file once.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
