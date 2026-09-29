@@ -3,3 +3,4 @@
 pub mod config;
 pub mod engine;
 pub mod rclone;
+pub mod service;

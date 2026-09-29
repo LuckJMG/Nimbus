@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Type, Value};
-
 // The macro attributes below take string literals. The constants and the
 // literals can drift apart.
 pub const BUS_NAME: &str = "io.github.luckjmg.nimbus";
@@ -23,7 +22,7 @@ pub enum Phase {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, OwnedValue)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Value, OwnedValue)]
 pub struct State {
     pub phase: Phase,
     /// The value is from 0.0 to 1.0, and is zero while the daemon is idle.

@@ -13,4 +13,5 @@ anyhow = "1"
 # library on any platform, so the default is off.
 notify = { version = "8", default-features = false }
 serde.workspace = true
-toml = "1"
+toml.workspace = true
+zbus.workspace = true
