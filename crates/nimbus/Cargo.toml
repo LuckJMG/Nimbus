@@ -9,6 +9,9 @@ license.workspace = true
 [dependencies]
 nimbus-ipc.workspace = true
 anyhow = "1"
+# The feature is the minimum GTK version, not the exact one. The window uses
+# nothing newer than GTK 4.10.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
 # The default feature pulls in tokio, which would add a second async runtime
 # next to the one zbus already brings. The blocking API keeps the tray
 # synchronous.

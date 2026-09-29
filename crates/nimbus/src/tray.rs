@@ -14,7 +14,12 @@ const FALLBACK: &str = "folder-sync";
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     SyncNow,
-    SetPaused(bool),
+    /// The worker resolves the toggle against the view, so the click sites
+    /// never need to know the current state.
+    TogglePaused,
+    /// Asks the main thread to show the window. The worker owns the relay,
+    /// because it is the only place that knows which thread an action needs.
+    ShowWindow,
 }
 
 /// What the tray shows. The daemon may not run, so the state is optional.
@@ -168,6 +173,12 @@ impl ksni::Tray for NimbusTray {
         overlay(&self.current())
     }
 
+    /// A left click opens the window. The menu is on a right click, because
+    /// MENU_ON_ACTIVATE already defaults to false.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.actions.send(Action::ShowWindow);
+    }
+
     /// Builds the menu. The host redraws it after every update, so the state
     /// here needs no separate refresh path.
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -197,13 +208,22 @@ impl ksni::Tray for NimbusTray {
                 // The view is the only record of the pause state. A cached
                 // flag would show a tick the daemon never confirmed.
                 checked: is_paused(&view),
-                activate: Box::new(move |this: &mut Self| {
-                    let next = !is_paused(&this.current());
-                    let _ = pause_actions.send(Action::SetPaused(next));
+                activate: Box::new(move |_| {
+                    let _ = pause_actions.send(Action::TogglePaused);
                 }),
                 ..Default::default()
             }),
             MenuItem::Separator,
+            MenuItem::Standard(StandardItem {
+                label: String::from("Settings"),
+                activate: {
+                    let settings_actions = self.actions.clone();
+                    Box::new(move |_| {
+                        let _ = settings_actions.send(Action::ShowWindow);
+                    })
+                },
+                ..Default::default()
+            }),
             MenuItem::Standard(StandardItem {
                 label: String::from("Quit"),
                 icon_name: String::from("application-exit"),
@@ -393,6 +413,7 @@ mod tests {
                 "Sync now",
                 "Pause",
                 "a separator",
+                "Settings",
                 "Quit",
             ]
         );
