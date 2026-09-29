@@ -1,0 +1,16 @@
+[package]
+name = "nimbus"
+description = "The Nimbus tray client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nimbus-ipc.workspace = true
+anyhow = "1"
+# The default feature pulls in tokio, which would add a second async runtime
+# next to the one zbus already brings. The blocking API keeps the tray
+# synchronous.
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+zbus.workspace = true
