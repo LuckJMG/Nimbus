@@ -23,17 +23,15 @@ pub enum Phase {
     Error,
 }
 
-/// The full state of the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, OwnedValue)]
 pub struct State {
     pub phase: Phase,
-    /// The progress ratio, from 0.0 to 1.0. The value is zero when the daemon
-    /// is idle.
+    /// The value is from 0.0 to 1.0, and is zero while the daemon is idle.
     pub progress: f64,
     /// The Unix time of the last finished run. The value is zero before the
     /// first run.
     pub last_run: u64,
-    /// The last error message. An empty string means that there is no error.
+    /// An empty string means that there is no error.
     pub last_error: String,
 }
 
@@ -46,8 +44,8 @@ pub trait Nimbus {
     /// Starts a run now. The call returns before the run finishes.
     fn sync_now(&self) -> zbus::Result<()>;
 
-    /// Pauses the daemon. The current run finishes first. The daemon skips
-    /// all later runs until you call the method again.
+    /// Pauses the daemon. The daemon skips all later runs until you call the
+    /// method again.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
 
     // The interface has no SetMode method. The daemon runs rclone bisync.

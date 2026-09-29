@@ -6,25 +6,25 @@ use nimbus_ipc::{Phase, State};
 
 use crate::config::Config;
 
-/// A request from a client. Step 4 sends these over the D-Bus.
+/// A request from a client, on its way to the engine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Start a run at once.
     SyncNow,
-    /// Stop before the next run, or start runs again.
+    /// A run that is active finishes. Later runs wait for a resume.
     SetPaused(bool),
 }
 
 /// A message for the engine. The watcher and the run thread send these.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// A client sent a command.
     Command(Command),
-    /// The local folder changed. A read event does not send this.
+    /// A read event does not send this, because rclone reads the folder
+    /// during every run.
     Changed,
-    /// The active run reports a ratio from 0.0 to 1.0.
+    /// The ratio is from 0.0 to 1.0.
     Progress(f64),
-    /// The active run ended. The code is nothing when a signal stopped rclone.
+    /// The code is nothing when a signal stopped rclone. The tail holds the
+    /// last error messages.
     Finished {
         code: Option<i32>,
         tail: Vec<String>,
@@ -76,24 +76,20 @@ impl Engine {
         }
     }
 
-    /// Returns the settings of the daemon.
     pub fn config(&self) -> &Config {
         &self.cfg
     }
 
-    /// Returns the state of the daemon.
     pub fn snapshot(&self) -> &State {
         &self.state
     }
 
-    /// Returns a flag for the run threads. The engine sets the
-    /// flag when the user pauses.
+    /// The run threads read this flag. The engine is the only writer.
     pub fn pause_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.pause)
     }
 
-    /// Applies one message. The caller supplies both clocks, so
-    /// a test can choose the time.
+    /// The caller supplies both clocks, so a test can choose the time.
     pub fn on_event(&mut self, event: Event, now: Instant, unix: u64) {
         match event {
             Event::Command(Command::SyncNow) => self.run_wanted = true,
@@ -133,8 +129,7 @@ impl Engine {
         true
     }
 
-    /// Returns true when the daemon must write the config file. The function
-    /// clears the flag, so the daemon writes the file once.
+    /// The function clears the flag, so the daemon writes the file once.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }

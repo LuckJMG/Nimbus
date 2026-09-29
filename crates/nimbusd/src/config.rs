@@ -3,22 +3,21 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-/// The settings of the daemon. The daemon reads this file at start.
+/// The daemon reads this file at start.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
-    /// This field names the rclone remote.
     pub remote: String,
-    /// This field names the folder in the remote.
+    /// The folder in the remote.
     pub path: String,
-    /// This field names the local folder.
+    /// The local folder.
     pub local: PathBuf,
-    /// The daemon does not start a run while this field is true.
+    /// A run that is active finishes. Later runs wait for a resume.
     pub paused: bool,
-    /// This field sets the time between two runs, in seconds.
     pub interval_secs: u64,
-    /// This field sets the quiet time after a file change, in seconds.
+    /// The daemon starts a run when no change arrives for this many seconds.
     pub debounce_secs: u64,
-    /// The next run uses the rclone flag --resync while this field is true.
+    /// The next run uses the rclone flag --resync. The flag clears only after
+    /// a run that ends without an error.
     pub resync_pending: bool,
 }
 
@@ -70,26 +69,22 @@ impl Config {
     }
 }
 
-/// Builds the path of the config file for one base directory. A test passes
-/// a temporary directory.
+/// A test passes a temporary directory.
 pub fn path_in(base: &Path) -> PathBuf {
     base.join("nimbus").join("config.toml")
 }
 
-/// Returns the path of the config file. The daemon prints the
-/// path when it cannot use the settings.
+/// The daemon prints this path when it cannot use the settings.
 pub fn path() -> PathBuf {
     path_in(&config_home())
 }
 
-/// Reads the config file. The daemon writes a new file when the
-/// file does not exist.
+/// Writes a new file when the file does not exist.
 pub fn load() -> Result<Config> {
     load_from(&path_in(&config_home()))
 }
 
-/// Reads the config file from a known path. A test passes a temporary
-/// path.
+/// A test passes a temporary path.
 pub fn load_from(file: &Path) -> Result<Config> {
     if !file.exists() {
         let mut cfg = Config::default();
@@ -108,13 +103,11 @@ pub fn load_from(file: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
-/// Writes the config file.
 pub fn save(cfg: &Config) -> Result<()> {
     save_to(cfg, &path_in(&config_home()))
 }
 
-/// Writes the config file to a known path. A test passes a temporary
-/// path.
+/// A test passes a temporary path.
 pub fn save_to(cfg: &Config, file: &Path) -> Result<()> {
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)

@@ -8,7 +8,6 @@ use std::sync::mpsc::Sender;
 use crate::config::Config;
 use crate::engine::Event;
 
-/// The name of the rclone program.
 const PROGRAM: &str = "rclone";
 
 /// The daemon keeps this many error messages for the tray. The oldest message
@@ -31,7 +30,6 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         }
     };
     let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL);
-    // The command pipes the error output, so the read cannot fail here.
     let errors = child
         .stderr
         .take()
