@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Type, Value};
 
-// The macro attributes below take literals, so these constants and those
+// The macro attributes below take string literals. The constants and the
 // literals can drift apart.
 pub const BUS_NAME: &str = "io.github.luckjmg.nimbus";
 pub const OBJECT_PATH: &str = "/io/github/luckjmg/nimbus";
@@ -13,8 +13,8 @@ pub const INTERFACE: &str = "io.github.luckjmg.nimbus1";
 /// The phase of the sync engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
 #[serde(rename_all = "lowercase")]
-// Required. Without it the derive casts the enum to u32 rather than sending
-// a string.
+// This attribute is required. Without it, the derive macro sends the enum as
+// a u32 instead of a string.
 #[zvariant(signature = "s", rename_all = "lowercase")]
 pub enum Phase {
     Idle,
@@ -27,11 +27,13 @@ pub enum Phase {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, OwnedValue)]
 pub struct State {
     pub phase: Phase,
-    /// Ratio from 0.0 to 1.0. Zero while idle.
+    /// The progress ratio, from 0.0 to 1.0. The value is zero when the daemon
+    /// is idle.
     pub progress: f64,
-    /// Unix time of the last finished run. Zero means never.
+    /// The Unix time of the last finished run. The value is zero before the
+    /// first run.
     pub last_run: u64,
-    /// An empty string means no error.
+    /// The last error message. An empty string means that there is no error.
     pub last_error: String,
 }
 
@@ -41,19 +43,21 @@ pub struct State {
     default_path = "/io/github/luckjmg/nimbus"
 )]
 pub trait Nimbus {
-    /// Start a run now. The call returns at once, without waiting.
+    /// This method starts a run now. The call returns before the run finishes.
     fn sync_now(&self) -> zbus::Result<()>;
 
-    /// Stop after the current run, and skip every run until unpaused.
+    /// This method pauses the daemon. The current run finishes first. The
+    /// daemon skips all later runs until you call this method again.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
 
-    // No SetMode method. The daemon runs rclone bisync and nothing else.
+    // The interface has no SetMode method. The daemon runs rclone bisync.
 
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
 
-    // Named Changed because a State property already generates
-    // receive_state_changed, and StateChanged would collide with it.
+    // The signal is named Changed. A property named State already generates
+    // receive_state_changed. A signal named StateChanged generates the same
+    // name twice.
     #[zbus(signal)]
     fn changed(&self, state: State) -> zbus::Result<()>;
 }
@@ -62,22 +66,22 @@ pub trait Nimbus {
 mod tests {
     use super::*;
 
-    /// The daemon uses the blocking proxy, the tray uses the async one.
-    /// This stops compiling if a zbus upgrade drops either of them.
+    /// The daemon uses the blocking proxy. The tray uses the async proxy. This
+    /// test stops compiling if a zbus upgrade removes either type.
     #[test]
     fn both_proxies_exist() {
         fn names(_: Option<NimbusProxy<'_>>, _: Option<NimbusProxyBlocking<'_>>) {}
         let _ = names;
     }
 
-    /// The daemon emits Changed by hand, so a field reorder here would break
-    /// every client at runtime with no compile error.
+    /// The daemon emits the Changed signal directly. A field reorder in State
+    /// breaks every client at runtime. The compiler does not detect the change.
     #[test]
     fn state_signature_is_stable() {
         assert_eq!(State::SIGNATURE, "(sdts)");
     }
 
-    /// Phase and the TOML config share one spelling for each value.
+    /// The Phase enum and the config file use the same four words.
     #[test]
     fn phase_names_match_serde() {
         use serde::Deserialize;
