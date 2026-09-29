@@ -50,8 +50,9 @@ pub trait Nimbus {
     /// Stop after the current run, and skip every run until unpaused.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
 
-    /// Switch between "sync" and "bisync". Any other value is rejected.
-    fn set_mode(&self, mode: &str) -> zbus::Result<()>;
+    // There is no SetMode method. The daemon runs rclone bisync and nothing
+    // else. Adding a method later is a pure addition on the bus, so the
+    // interface version stays at 1.
 
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
