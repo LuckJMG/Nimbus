@@ -1,9 +1,63 @@
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 
 use crate::config::Config;
+use crate::engine::Event;
 
 /// The name of the rclone program.
 const PROGRAM: &str = "rclone";
+
+/// The daemon keeps this many error messages for the tray. The oldest message
+/// leaves the list when the list is full.
+const TAIL: usize = 10;
+
+/// This function runs rclone once. The function blocks until the run ends, so
+/// the caller runs it on its own thread. The function reads the pause flag
+/// between output lines, and it stops the process within about one second.
+pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
+    let mut child = match command(cfg).spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let text = format!("the daemon cannot start {PROGRAM}: {err}");
+            let _ = events.send(Event::Finished {
+                code: None,
+                tail: vec![text],
+            });
+            return;
+        }
+    };
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL);
+    // The command pipes the error output, so the read cannot fail here.
+    let errors = child
+        .stderr
+        .take()
+        .expect("the command pipes the error output");
+    for line in BufReader::new(errors).lines() {
+        let Ok(line) = line else { break };
+        if pause.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            break;
+        }
+        if let Some(ratio) = parse_progress(&line) {
+            let _ = events.send(Event::Progress(ratio));
+        }
+        if let Some(text) = parse_error(&line) {
+            if tail.len() == TAIL {
+                tail.pop_front();
+            }
+            tail.push_back(text);
+        }
+    }
+    let code = child.wait().ok().and_then(|status| status.code());
+    let _ = events.send(Event::Finished {
+        code,
+        tail: tail.into(),
+    });
+}
 
 /// This function builds the rclone command for one run. The daemon reads the
 /// error output from the process, and it discards the standard output.

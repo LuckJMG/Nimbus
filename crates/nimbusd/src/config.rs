@@ -76,6 +76,12 @@ pub fn path_in(base: &Path) -> PathBuf {
     base.join("nimbus").join("config.toml")
 }
 
+/// This function returns the path of the config file. The daemon prints the
+/// path when it cannot use the settings.
+pub fn path() -> PathBuf {
+    path_in(&config_home())
+}
+
 /// This function reads the config file. The daemon writes a new file when the
 /// file does not exist.
 pub fn load() -> Result<Config> {
@@ -86,8 +92,12 @@ pub fn load() -> Result<Config> {
 /// function with a temporary path.
 pub fn load_from(file: &Path) -> Result<Config> {
     if !file.exists() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // The file keeps the tilde, because the user reads and edits it. The
+        // copy in memory holds the real path, because rclone cannot open a
+        // path that starts with a tilde.
         save_to(&cfg, file)?;
+        cfg.local = expand_tilde(&cfg.local);
         return Ok(cfg);
     }
     let text = std::fs::read_to_string(file)
@@ -199,6 +209,22 @@ mod tests {
         let cfg = load_from(&file).expect("the daemon created a config file");
         assert!(file.exists(), "the daemon wrote a config file");
         assert!(cfg.resync_pending, "the first run must use --resync");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The default holds a tilde. A daemon that keeps the tilde reports a path
+    // that does not exist, and rclone receives a path it cannot open.
+    #[test]
+    fn a_new_config_expands_the_home_mark() {
+        let base = temp_base("expand-new");
+        let file = path_in(&base);
+        let cfg = load_from(&file).expect("the daemon created a config file");
+        assert_eq!(cfg.local, expand_tilde(Path::new("~/Nimbus")));
+        let on_disk = std::fs::read_to_string(&file).expect("the daemon read the config file");
+        assert!(
+            on_disk.contains("~/Nimbus"),
+            "the file keeps the tilde for the user"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

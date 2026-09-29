@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+nimbus-ipc.workspace = true
 anyhow = "1"
+# The default feature pulls a C library on macOS. The daemon needs no C
+# library on any platform, so the default is off.
+notify = { version = "8", default-features = false }
 serde.workspace = true
 toml = "1"
