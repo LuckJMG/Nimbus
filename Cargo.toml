@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/nimbus-ipc"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+nimbus-ipc = { path = "crates/nimbus-ipc" }
+serde = { version = "1", features = ["derive"] }
+zbus = "5.19"

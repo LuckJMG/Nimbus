@@ -1,0 +1,11 @@
+[package]
+name = "nimbus-ipc"
+description = "The D-Bus contract between the Nimbus daemon and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+zbus.workspace = true
