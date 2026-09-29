@@ -34,6 +34,13 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Reports whether the bus refused the name because another daemon holds it.
+/// Only that one error is a refusal, because only the user can free the name.
+/// Every other error must still fail, so that systemd retries the daemon.
+fn name_is_taken(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::NameTaken)
+}
+
 /// What one turn of the loop decided. The caller reads this after it unlocks
 /// the engine, so no side effect ever runs while the lock is held.
 struct Turn {
@@ -48,7 +55,9 @@ fn main() -> Result<()> {
         eprintln!("nimbusd: {err}");
         eprintln!("nimbusd: the config file is {}", config::path().display());
         eprintln!("nimbusd: fix the settings, then start the daemon again");
-        std::process::exit(1);
+        // A clean refusal exits with zero. Only the user can fix the settings,
+        // so a restart would fail in the same way and fill the journal.
+        return Ok(());
     }
     eprintln!(
         "nimbusd: syncing {} with {}",
@@ -77,16 +86,32 @@ fn serve(cfg: config::Config) -> Result<()> {
     // the daemon can refuse to start. Today zbus turns a taken name into an
     // error, so the check below is the second line of defence. The flag means
     // the daemon must own the name now, and it must not queue for it.
-    let reply = conn
+    let reply = match conn
         .request_name_with_flags(BUS_NAME, zbus::fdo::RequestNameFlags::DoNotQueue.into())
-        .context("the daemon cannot ask for the bus name")?;
+    {
+        Ok(reply) => reply,
+        Err(err) => {
+            // Only the user can free the name, so the daemon stops here. A
+            // clean stop exits with zero, which keeps systemd from restarting
+            // the daemon in a loop against the daemon that holds the name.
+            if name_is_taken(&err) {
+                eprintln!("nimbusd: another daemon already holds {BUS_NAME}");
+                eprintln!("nimbusd: stop that daemon, then start this one again");
+                return Ok(());
+            }
+            return Err(err).context("the daemon cannot ask for the bus name");
+        }
+    };
     if !matches!(
         reply,
         zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner
     ) {
         eprintln!("nimbusd: another daemon already holds {BUS_NAME}, reply {reply:?}");
         eprintln!("nimbusd: stop that daemon, then start this one again");
-        std::process::exit(1);
+        // A clean refusal exits with zero, for the same reason as a bad config.
+        // The loop has not started, so the return reaches main and ends the
+        // process with a zero code.
+        return Ok(());
     }
     eprintln!("nimbusd: serving {INTERFACE} at {OBJECT_PATH}");
 
@@ -202,5 +227,17 @@ mod tests {
     fn an_unknown_event_does_not_trigger_a_run() {
         assert!(!is_trigger(&EventKind::Any));
         assert!(!is_trigger(&EventKind::Other));
+    }
+
+    // A taken name is the one error that only the user can fix. Every other
+    // error must still fail the start, or the daemon never retries.
+    #[test]
+    fn only_a_taken_name_is_a_refusal() {
+        assert!(name_is_taken(&zbus::Error::NameTaken));
+        assert!(!name_is_taken(&zbus::Error::InvalidReply));
+        assert!(!name_is_taken(&zbus::Error::MissingParameter("path")));
+        assert!(!name_is_taken(&zbus::Error::Failure(String::from(
+            "bus is gone"
+        ))));
     }
 }

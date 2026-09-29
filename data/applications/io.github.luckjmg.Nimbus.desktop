@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Nimbus
+GenericName=Google Drive sync
+Comment=Sync a local folder with Google Drive
+Exec=/usr/bin/nimbus
+Icon=nimbus-sync
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=drive;sync;backup;rclone;
+# The tray stays up after the window closes, so the shell gets no window to
+# wait for. A false value also leaves no spinning pointer when the start fails.
+StartupNotify=false
+# This key counts only in ~/.config/autostart, so copy the file there to start
+# the tray at login.
+X-GNOME-Autostart-enabled=true

@@ -5,9 +5,9 @@ when files change. A GTK4 tray client talks to it over D-Bus.
 
 ## State
 
-Three crates exist. The daemon and the tray both work against a live bus. There is
-no README, no systemd unit, no desktop entry, and no packaging. The icon exists at
-`data/icons/hicolor/scalable/apps/nimbus-sync.svg`.
+Three crates exist. The daemon and the tray both work against a live bus. The
+systemd unit, the desktop entry, and the D-Bus service file exist under `data/`.
+There is no README and no packaging.
 
 | Crate | Role |
 | --- | --- |
@@ -27,8 +27,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No CI runs these. Run all three before every commit, in that order. 84 tests pass
-today: 3 in `nimbus-ipc`, 51 in the `nimbusd` library, 5 in the `nimbusd` binary,
+No CI runs these. Run all three before every commit, in that order. 85 tests pass
+today: 3 in `nimbus-ipc`, 51 in the `nimbusd` library, 6 in the `nimbusd` binary,
 and 25 in `nimbus`.
 
 ```console
@@ -148,14 +148,76 @@ the first call takes them. An `AtomicBool` keeps the first call from starting a
 second worker.
 
 `gtk::Application` needs a `.service` file to be activatable. Without one, a call to
-`org.freedesktop.Application.Activate` fails with "The name is not activatable". A
-second instance of the binary still hands its activation over and exits, because
-`g_application_register` finds the owner of the name. The step 8 unit supplies the
-service file.
+`org.freedesktop.Application.Activate` fails with "The name ... was not provided by
+any .service files". A second instance of the binary still hands its activation
+over and exits, because `g_application_register` finds the owner of the name.
+
+The destination of that call is the application name, not the interface:
+
+```console
+busctl --user call io.github.luckjmg.Nimbus /io/github/luckjmg/Nimbus org.freedesktop.Application Activate a{sv} 0
+```
+
+Passing `org.freedesktop.Application` as the destination asks the bus about a
+different name, and the error then says nothing about the tray.
+
+A host looks an icon name up in its own cache, and the cache does not know an icon
+that was installed after the last rebuild. So `Icon::resolve` returns the installed
+**directory**, not an empty theme path. A live run on KDE showed a blank tray item
+until this was fixed, and no unit test could have found it.
 
 The heading of the window takes `status_name`, which is the short name. The line
 below it takes the error from `state.last_error`. The tooltip takes `status_text`,
 which is the full text. Only the tooltip has the room for the message.
+
+## Installing
+
+The files in `data/` are the package payload. Install them with:
+
+```console
+sudo install -Dm755 target/release/nimbusd /usr/bin/nimbusd
+sudo install -Dm755 target/release/nimbus /usr/bin/nimbus
+sudo install -Dm644 data/systemd/user/nimbusd.service /usr/lib/systemd/user/
+sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service /usr/share/dbus-1/services/
+sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop /usr/share/applications/
+sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync.svg /usr/share/icons/hicolor/scalable/apps/
+cp data/applications/io.github.luckjmg.Nimbus.desktop ~/.config/autostart/
+systemctl --user daemon-reload
+systemctl --user enable --now nimbusd.service
+```
+
+The paths are absolute because a D-Bus service file expands neither `$HOME` nor
+`%h`. A systemd unit and a desktop entry do expand `%h`, so a user install needs
+the service file rewritten instead.
+
+Two start methods, one for each program. The daemon runs as a systemd user unit,
+because it needs no display and because a restart policy matters. The tray starts
+from the autostart entry, because the login session owns `WAYLAND_DISPLAY` and a
+systemd user unit does not. A unit for the tray with
+`WantedBy=graphical-session.target` would never start on GNOME, and that target
+does not exist there.
+
+The D-Bus service file exists to make the name activatable. It is not a start
+method. The bus passes the activation environment, which has no `WAYLAND_DISPLAY`,
+so a tray started by the bus stops at once.
+
+The user directory `~/.local/share/dbus-1/services` works with `dbus-daemon`,
+because `standard_session_servicedirs` includes the XDG data directories. The
+session bus on a current Fedora and Arch runs `dbus-broker`, and its built-in
+service list did not pick the file up in a live run. Ship to
+`/usr/share/dbus-1/services`, which every implementation scans.
+
+## A clean refusal exits with zero
+
+Two start failures can only be fixed by the user: a bad config, and a bus name
+that another daemon holds. Both exit with zero, so `Restart=on-failure` leaves
+the unit stopped instead of restarting it every few seconds. Every other start
+failure keeps its non-zero code, so systemd retries.
+
+The name check needs care. `request_name_with_flags` returns
+`zbus::Error::NameTaken` for a taken name, not a reply, so the reply check that
+follows it never runs. `name_is_taken` matches the error, and the reply check
+stays as a second line of defence.
 
 ## Design limits, not bugs
 

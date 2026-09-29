@@ -1,0 +1,11 @@
+[D-BUS Service]
+Name=io.github.luckjmg.Nimbus
+Exec=/usr/bin/nimbus
+# This file makes the name activatable, so org.freedesktop.Application.Activate
+# reaches a running tray and presents its window. Without it the bus reports
+# "The name is not activatable".
+#
+# The tray is not meant to start from here. The bus daemon passes the
+# activation environment, which has no WAYLAND_DISPLAY, so GTK stops at once.
+# The autostart entry in ~/.config/autostart starts the tray with the display
+# of the session.

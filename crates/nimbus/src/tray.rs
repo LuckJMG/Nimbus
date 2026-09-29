@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -40,24 +40,24 @@ impl Icon {
     pub fn resolve() -> Self {
         pick(
             Path::new(&source_theme_path()).join(ICON_FILE).is_file(),
-            installed(),
+            installed_theme_path(),
         )
     }
 }
 
 /// Picks the icon. The caller supplies both answers, so a test decides them
 /// without depending on what happens to be installed on the machine.
-pub fn pick(source: bool, installed: bool) -> Icon {
+pub fn pick(source: bool, installed: Option<PathBuf>) -> Icon {
     match (source, installed) {
         (true, _) => Icon {
             name: String::from(ICON),
             theme_path: source_theme_path(),
         },
-        (false, true) => Icon {
+        (false, Some(dir)) => Icon {
             name: String::from(ICON),
-            theme_path: String::new(),
+            theme_path: dir.to_string_lossy().into_owned(),
         },
-        (false, false) => Icon {
+        (false, None) => Icon {
             name: String::from(FALLBACK),
             theme_path: String::new(),
         },
@@ -244,17 +244,21 @@ fn source_theme_path() -> String {
         .into_owned()
 }
 
-/// Reports whether the icon file sits in an XDG icon directory, where the
-/// package installs it.
-fn installed() -> bool {
-    if let Some(home) = std::env::var_os("XDG_DATA_HOME")
-        && Path::new(&home).join("icons").join(ICON_FILE).is_file()
-    {
-        return true;
-    }
-    std::env::var_os("XDG_DATA_DIRS").is_some_and(|dirs| {
-        std::env::split_paths(&dirs).any(|dir| dir.join("icons").join(ICON_FILE).is_file())
-    })
+/// Finds the XDG icon directory that holds the file, where the package installs
+/// it. The function returns the directory, because a host looks an icon name up
+/// in its own cache, and the cache does not know an icon that was installed
+/// after the last rebuild. The path makes the host read the file instead.
+fn installed_theme_path() -> Option<PathBuf> {
+    let dirs = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(
+            std::env::var_os("XDG_DATA_DIRS")
+                .map(|dirs| std::env::split_paths(&dirs).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+    dirs.map(|dir| dir.join("icons"))
+        .find(|dir| dir.join(ICON_FILE).is_file())
 }
 
 #[cfg(test)]
@@ -276,7 +280,7 @@ mod tests {
 
     fn tray(view: View) -> NimbusTray {
         let (tx, _rx) = mpsc::channel();
-        NimbusTray::new(Arc::new(Mutex::new(view)), pick(true, false), tx)
+        NimbusTray::new(Arc::new(Mutex::new(view)), pick(true, None), tx)
     }
 
     fn labels(menu: &[ksni::MenuItem<NimbusTray>]) -> Vec<String> {
@@ -294,7 +298,7 @@ mod tests {
 
     #[test]
     fn pick_uses_the_source_tree() {
-        let icon = pick(true, false);
+        let icon = pick(true, None);
         assert_eq!(icon.name, ICON);
         assert!(
             icon.theme_path.contains("data/icons"),
@@ -302,19 +306,19 @@ mod tests {
         );
     }
 
+    // A host looks an icon name up in its own cache, and the cache does not
+    // know an icon that was installed after the last rebuild. The path makes
+    // the host read the file. A live run on KDE showed a blank item without it.
     #[test]
-    fn pick_uses_the_installed_icon() {
-        let icon = pick(false, true);
+    fn pick_sends_the_installed_directory_to_the_host() {
+        let icon = pick(false, Some(PathBuf::from("/usr/share/icons")));
         assert_eq!(icon.name, ICON);
-        assert!(
-            icon.theme_path.is_empty(),
-            "an installed icon needs no path"
-        );
+        assert_eq!(icon.theme_path, "/usr/share/icons");
     }
 
     #[test]
     fn pick_falls_back_when_the_file_is_absent() {
-        let icon = pick(false, false);
+        let icon = pick(false, None);
         assert_eq!(icon.name, FALLBACK);
         assert!(icon.theme_path.is_empty());
     }

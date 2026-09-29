@@ -1,0 +1,17 @@
+[Unit]
+Description=Nimbus Google Drive sync daemon
+Documentation=https://github.com/luckjmg/nimbus
+# The daemon needs no display. zbus finds the session bus through
+# XDG_RUNTIME_DIR, which a user manager always has, so the unit needs no
+# After= line and no Environment= line.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nimbusd
+# A panic must not end the session without a daemon. A clean refusal exits
+# with zero, so a bad config or a taken bus name leaves the unit stopped.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
