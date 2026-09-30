@@ -96,7 +96,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         .application(app)
         .title("Nimbus")
         .default_width(420)
-        .default_height(260)
         .build();
     // Closing the window hides it. The tray keeps running, and a left click
     // brings the window back.
