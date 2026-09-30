@@ -94,9 +94,9 @@ first start, so start the daemon once, then edit the file and start it again.
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`. The flag clears only after a run that ends without an error. |
 
-The daemon also keeps its record of your files in `bisync/` beside the config file.
+The daemon also keeps its record of your files in `bisync/`, beside the config file.
 Do not delete that directory while the daemon runs. A lost connection leaves the
-record unusable, and the daemon repairs it before the next run.
+record unusable, and the daemon restores it before the next run.
 
 A run starts when any one of these is true:
 
@@ -107,6 +107,11 @@ A run starts when any one of these is true:
 
 The daemon watches only the local folder. A change that arrives from another
 machine waits for the next interval.
+
+A lost connection does not need a manual fix. The daemon keeps a record of what
+both sides agreed on, and it restores that record before the next run, so the retry
+stays incremental. Only a crash that left no record at all costs one full resync.
+The Troubleshooting section covers that case.
 
 ## Use
 
@@ -170,15 +175,17 @@ start this one again. A second daemon exits with zero, because only you can free
 the name.
 
 **rclone says "Bisync aborted. Must run --resync to recover."** A lost connection
-left rclone without a usable record of your files. The daemon repairs this on its
-own, and the next run is incremental again. It takes two runs in the worst case,
-and the second run rebuilds the record, so no action is needed. Set
-`interval_secs` low if the connection is often down, because a failed run waits for
-the interval before it retries.
+left rclone without a usable record of your files. The daemon repairs this by
+itself before the next run, so the retry is incremental and no action is needed.
 
-**The daemon stops after a crash and needs a full rebuild.** Set
-`resync_pending = true` in the config file and start the daemon again. This is the
-one case the repair cannot fix, and it is rare.
+If the message stays in the tray, the daemon cannot repair it. That happens when a
+run died before rclone wrote any record, and then nothing survives to restore. Set
+`resync_pending = true` in the config file and start the daemon again. The cost is
+one full pass over both sides.
+
+A failed run waits for `interval_secs` before it retries, because there is no
+separate retry timer. Set `interval_secs` to something like `300` if the connection
+is often down, so a blip costs you five minutes instead of fifteen.
 
 **The first run fails on a test remote.** The destination folder must exist
 before the first run. Google Drive creates folders, so this affects test
@@ -211,7 +218,9 @@ just uninstall-user
 ```
 
 The config file and the rclone remote stay, because both hold settings that you
-wrote. Remove `~/.config/nimbus/config.toml` by hand if you want them gone.
+wrote. Remove `~/.config/nimbus/` by hand if you want them gone. That directory
+holds the config file and the `bisync/` record, so a fresh install starts with no
+record and rebuilds it on the first run.
 
 ## Development
 
@@ -226,7 +235,8 @@ No CI runs these three. Run all of them before every commit, in that order.
 
 The unit tests do not cover the bus, the watcher, the panel, or rclone. Those
 need a live run, and `AGENTS.md` holds the procedure together with the traps
-that a live run found.
+that a live run found. That file also holds the crash test for the listing repair,
+which no unit test can cover.
 
 | Crate | Role |
 | --- | --- |

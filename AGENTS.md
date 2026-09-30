@@ -112,7 +112,8 @@ the scratch tree, and no state reaches the real cache.
 
 If you test against a folder that an older build already synced, the listing in
 `~/.cache/rclone/bisync` is now unused. Delete it after the new dir holds a
-healthy `.lst`.
+healthy `.lst`. Never sweep that dir with a wildcard such as `*scratch*`, because a
+pattern over the whole name also matches entries that name a real local folder.
 
 ## rclone
 
@@ -132,6 +133,36 @@ For a live test, a `local` rclone remote with no root resolves `name:path` again
 the **process** working directory, and the destination folder must already exist.
 Otherwise every run fails with "directory not found" and the state stays `error`.
 Google Drive creates folders, so this affects test remotes only.
+
+## The crash test
+
+The repair cannot be proven by a unit test, because the failure is rclone's on-disk
+behaviour. Repeat this after any change to `repair` or to the rclone flags.
+
+Use the scratch remote from the live check. Start the daemon, then drop a file large
+enough that the transfer takes seconds. `/tmp` is a small tmpfs on several
+distributions, and the remote copy needs room for the file, so check the free space
+with `df -h /tmp` before the run. A run that hits the limit reports "disk quota
+exceeded" and looks like a repair failure that never happened:
+
+```console
+dd if=/dev/urandom of=/tmp/scratch/local/big.bin bs=1M count=1200
+```
+
+Kill rclone mid-transfer with `timeout -s KILL`, which leaves the same debris a
+dropped connection does. Then restart the daemon and press Sync now once:
+
+- The state must reach `idle`.
+- The config must still hold `resync_pending = false`, which proves no resync ran.
+- `sha256sum` on both sides must match.
+
+Repeat with the `.lst` files deleted and only the `.lst-old` spares left, and then
+with the whole dir emptied. The last case must self-heal through a resync. The
+"A lost connection" section above records the three shapes and what each one leaves
+behind.
+
+Remove `/tmp/scratch/local/big.bin` before the next case, or the next run spends its
+time moving it again and the crash lands at the wrong moment.
 
 ## zbus
 
