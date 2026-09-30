@@ -186,8 +186,9 @@ just install-user       # into the home directory, needs no root
 ```
 
 Both recipes list every file and where it lands. Do not repeat those paths in a
-document. `just uninstall` and `just uninstall-system` remove what the matching
-recipe added.
+document. The name says the scope: `install` writes into `/usr`, and
+`install-user` writes into the home directory. `uninstall` and `uninstall-user`
+remove what the matching recipe added.
 
 The paths are absolute because a D-Bus service file expands neither `$HOME` nor
 `%h`. A systemd unit and a desktop entry do expand `%h`, so a user install needs
@@ -199,6 +200,12 @@ from the autostart entry, because the login session owns `WAYLAND_DISPLAY` and a
 systemd user unit does not. A unit for the tray with
 `WantedBy=graphical-session.target` would never start on GNOME, and that target
 does not exist there.
+
+`run-tray` starts the tray before the next login, because both installs write the
+autostart entry and neither starts the tray. The two recipes install to two paths,
+so the recipe probes for the home path first and falls back to `/usr`. It runs the
+installed binary, not `target/release`, so `just run-tray` does not test your
+build. The live check starts `./target/debug/nimbus` for that reason.
 
 The D-Bus service file exists to make the name activatable. It is not a start
 method. The bus passes the activation environment, which has no `WAYLAND_DISPLAY`,

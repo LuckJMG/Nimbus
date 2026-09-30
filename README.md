@@ -64,7 +64,9 @@ Troubleshooting section covers.
 The two programs start in two different ways. The daemon runs as a systemd user
 unit, because it needs no display and because a restart policy matters. The tray
 starts from the autostart entry, because the login session owns `WAYLAND_DISPLAY`
-and a systemd user unit does not.
+and a systemd user unit does not. The autostart entry takes effect at the next
+login. `just run-tray` starts the tray now instead, and it finds the installed
+binary after either install.
 
 ## Configure
 
@@ -189,13 +191,13 @@ install into your home directory is the case that needs one.
 
 ## Uninstall
 
-`just uninstall` removes the files that `just install-user` added, and it needs
-no root. `just uninstall-system` removes the files that `just install` added, and
-it needs root.
+`just uninstall` removes the files that `just install` added, and it needs root.
+`just uninstall-user` removes the files that `just install-user` added, and it
+needs no root.
 
 ```console
-just uninstall
-sudo just uninstall-system
+sudo just uninstall
+just uninstall-user
 ```
 
 The config file and the rclone remote stay, because both hold settings that you

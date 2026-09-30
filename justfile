@@ -54,10 +54,10 @@ install-user: build
 
 # Start the tray now, without waiting for a login.
 run-tray:
-    {{prefix}}/bin/nimbus
+    if [ -x "{{home}}/.local/bin/nimbus" ]; then exec "{{home}}/.local/bin/nimbus"; else exec "{{prefix}}/bin/nimbus"; fi
 
 # Remove the files that install-user added. Needs no root.
-uninstall:
+uninstall-user:
     # The config file and the rclone remote stay, because both hold settings
     # that the user wrote.
     -systemctl --user disable --now nimbusd.service
@@ -70,7 +70,7 @@ uninstall:
     systemctl --user daemon-reload
 
 # Remove the files that install added. Needs root.
-uninstall-system:
+uninstall:
     sudo rm -f {{prefix}}/bin/nimbusd {{prefix}}/bin/nimbus
     sudo rm -f {{prefix}}/lib/systemd/user/nimbusd.service
     sudo rm -f {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
