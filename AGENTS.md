@@ -27,9 +27,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No CI runs these. Run all three before every commit, in that order. 85 tests pass
-today: 3 in `nimbus-ipc`, 51 in the `nimbusd` library, 6 in the `nimbusd` binary,
-and 25 in `nimbus`.
+No CI runs these. Run all three before every commit, in that order. 83 tests pass
+today: 2 in `nimbus-ipc`, 53 in the `nimbusd` library, 2 in the `nimbusd` binary,
+and 26 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -109,10 +109,11 @@ in the 5.x line. Do not bump without a full workspace test **and** the live chec
 
 ## Adding a field to `State`
 
-Four derives, and the reason for three of them is not visible in the code.
+Six derives, and the reason for four of them is not visible in the code.
 
 - `Phase` needs `#[zvariant(signature = "s", rename_all = "lowercase")]`. Without the signature the derive puts the enum on the wire as a `u32`.
 - `Phase` also needs the `Value` derive, because the `OwnedValue` derive on `State` reads and writes it.
+- `Phase` and `State` need `Serialize`, because `Connection::emit_signal` takes a payload that implements it. Without the derive the daemon cannot send `Changed`.
 - `State` needs `Value` for the property getter, and `PartialEq` for the change check in the main loop.
 - `state_signature_is_stable` pins the wire signature to `(sdts)`. A reorder compiles cleanly and breaks every client at runtime.
 
@@ -172,19 +173,17 @@ which is the full text. Only the tooltip has the room for the message.
 
 ## Installing
 
-The files in `data/` are the package payload. Install them with:
+The files in `data/` are the package payload. The `justfile` holds the recipe,
+and it is the only copy:
 
 ```console
-sudo install -Dm755 target/release/nimbusd /usr/bin/nimbusd
-sudo install -Dm755 target/release/nimbus /usr/bin/nimbus
-sudo install -Dm644 data/systemd/user/nimbusd.service /usr/lib/systemd/user/
-sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service /usr/share/dbus-1/services/
-sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop /usr/share/applications/
-sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync.svg /usr/share/icons/hicolor/scalable/apps/
-cp data/applications/io.github.luckjmg.Nimbus.desktop ~/.config/autostart/
-systemctl --user daemon-reload
-systemctl --user enable --now nimbusd.service
+just install            # into /usr, needs root
+just install-user       # into the home directory, needs no root
 ```
+
+Both recipes list every file and where it lands. Do not repeat those paths in a
+document. `just uninstall` and `just uninstall-system` remove what the matching
+recipe added.
 
 The paths are absolute because a D-Bus service file expands neither `$HOME` nor
 `%h`. A systemd unit and a desktop entry do expand `%h`, so a user install needs

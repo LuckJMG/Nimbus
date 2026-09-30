@@ -49,22 +49,17 @@ cargo build --release
 
 ## Install
 
+The `justfile` holds the recipe, and it is the only copy of the file list.
+
 ```console
-sudo install -Dm755 target/release/nimbusd /usr/bin/nimbusd
-sudo install -Dm755 target/release/nimbus /usr/bin/nimbus
-sudo install -Dm644 data/systemd/user/nimbusd.service /usr/lib/systemd/user/
-sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service /usr/share/dbus-1/services/
-sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop /usr/share/applications/
-sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync.svg /usr/share/icons/hicolor/scalable/apps/
-cp data/applications/io.github.luckjmg.Nimbus.desktop ~/.config/autostart/
-systemctl --user daemon-reload
-systemctl --user enable --now nimbusd.service
+just install            # into /usr, needs root
+just install-user       # into your home directory, needs no root
 ```
 
-`just install` runs the same commands. `just install-user` installs into your
-home directory and needs no root, but it rewrites the absolute paths in the unit
-and the service file, so read the paths it prints. A home directory install also
-needs an icon cache rebuild, which the Troubleshooting section covers.
+Read the `justfile` for what each recipe installs and where. `install-user`
+rewrites the absolute paths in the unit and the service file, so read the paths
+it prints. A home directory install also needs an icon cache rebuild, which the
+Troubleshooting section covers.
 
 The two programs start in two different ways. The daemon runs as a systemd user
 unit, because it needs no display and because a restart policy matters. The tray
