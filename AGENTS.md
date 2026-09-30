@@ -6,8 +6,11 @@ when files change. A GTK4 tray client talks to it over D-Bus.
 ## State
 
 Three crates exist. The daemon and the tray both work against a live bus. The
-systemd unit, the desktop entry, and the D-Bus service file exist under `data/`.
-There is no README and no packaging.
+systemd unit, the desktop entry, the D-Bus service file, and the icon exist under
+`data/`. The `justfile` holds every install recipe, and it is the only copy of the
+file list. `README.md` holds the user-facing tables: the config keys, the D-Bus
+API, the menu, and the troubleshooting steps. `docs/screenshot.png` shows the
+window. No CI runs.
 
 | Crate | Role |
 | --- | --- |
@@ -27,9 +30,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No CI runs these. Run all three before every commit, in that order. 83 tests pass
-today: 2 in `nimbus-ipc`, 53 in the `nimbusd` library, 2 in the `nimbusd` binary,
-and 26 in `nimbus`.
+No CI runs these. Run all three before every commit, in that order. `just check`
+runs the same three. 83 tests pass today: 2 in `nimbus-ipc`, 53 in the `nimbusd`
+library, 2 in the `nimbusd` binary, and 26 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -77,7 +80,8 @@ dbus-monitor --session "type='signal',interface='io.github.luckjmg.nimbus1'"
 
 The window needs a display. `spectacle -b -n -o shot.png` takes one screenshot on
 KDE, and `pgrep -a nimbus` confirms that a second instance of the tray exits
-instead of adding a second icon.
+instead of adding a second icon. The README links `docs/screenshot.png`, so
+replace that file when a change moves anything in the window.
 
 ## rclone
 
