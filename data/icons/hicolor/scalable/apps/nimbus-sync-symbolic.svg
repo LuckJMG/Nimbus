@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The style block is the hook that KIconLoader rewrites with the palette of the
+     current color scheme. Without it, currentColor resolves to black on every
+     desktop. The two GTK class names drive the symbolic recolor on GNOME, and a
+     KDE SVG engine ignores them. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <title>Nimbus</title>
+  <defs><style type="text/css" id="current-color-scheme">.ColorScheme-Text { color:#232629; }</style></defs>
+  <path d="M4.7 12.7h6.6a2.75 2.75 0 0 0 .2-5.5 3.85 3.85 0 0 0-7.3-1A2.65 2.65 0 0 0 4.7 12.7z"
+        class="transparent-fill foreground-stroke ColorScheme-Text"
+        fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
+  <path d="M4.6 9.7h6.8M6.3 8 4.6 9.7 6.3 11.4M9.7 8l1.7 1.7-1.7 1.7"
+        class="transparent-fill foreground-stroke ColorScheme-Text"
+        fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

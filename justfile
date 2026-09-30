@@ -27,7 +27,7 @@ install: build
     sudo install -Dm644 data/systemd/user/nimbusd.service {{prefix}}/lib/systemd/user/nimbusd.service
     sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{prefix}}/share/applications/io.github.luckjmg.Nimbus.desktop
-    sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync.svg {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-sync.svg
+    sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
     install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     systemctl --user daemon-reload
     systemctl --user enable --now nimbusd.service
@@ -46,7 +46,7 @@ install-user: build
     sed "s|/usr/bin/nimbus|{{home}}/.local/bin/nimbus|" data/applications/io.github.luckjmg.Nimbus.desktop \
         > {{home}}/.local/share/applications/io.github.luckjmg.Nimbus.desktop
     install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
-    install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync.svg {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-sync.svg
+    install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
     systemctl --user daemon-reload
     systemctl --user enable --now nimbusd.service
     @echo "Check the rewritten paths before you trust them:"
@@ -66,7 +66,7 @@ uninstall-user:
     rm -f {{home}}/.local/bin/nimbusd {{home}}/.local/bin/nimbus
     rm -f {{home}}/.local/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     rm -f {{home}}/.local/share/applications/io.github.luckjmg.Nimbus.desktop
-    rm -f {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-sync.svg
+    rm -f {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
     systemctl --user daemon-reload
 
 # Remove the files that install added. Needs root.
@@ -75,6 +75,6 @@ uninstall:
     sudo rm -f {{prefix}}/lib/systemd/user/nimbusd.service
     sudo rm -f {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sudo rm -f {{prefix}}/share/applications/io.github.luckjmg.Nimbus.desktop
-    sudo rm -f {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-sync.svg
+    sudo rm -f {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
     sudo rm -f {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     systemctl --user daemon-reload

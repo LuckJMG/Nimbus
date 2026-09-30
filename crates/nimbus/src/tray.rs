@@ -7,9 +7,11 @@ use nimbus_ipc::Phase;
 
 use crate::view::{Action, View, is_paused, is_syncing, phase, status_name, status_text};
 
-/// The icon file inside a theme directory.
-const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-sync.svg";
-const ICON: &str = "nimbus-sync";
+/// The icon file inside a theme directory. The `-symbolic` name suffix is not
+/// decoration. GTK reads it to recolor the icon with the foreground of the
+/// desktop, and KDE reads the style block inside the file for the same job.
+const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-sync-symbolic.svg";
+const ICON: &str = "nimbus-sync-symbolic";
 const FALLBACK: &str = "folder-sync";
 
 /// The icon name, plus the theme directory when the host needs one to find it.
