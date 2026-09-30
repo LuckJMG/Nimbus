@@ -46,6 +46,17 @@ The unit tests do not cover the bus, the watcher, the panel, or rclone. Those ne
 real run. Set `XDG_CONFIG_HOME` to a scratch directory, because the daemon writes a
 config file on first start.
 
+Free the bus name first. One daemon owns `io.github.luckjmg.nimbus` in a session,
+so stop an installed one and quit a running tray:
+
+```console
+systemctl --user stop nimbusd.service
+```
+
+Without that, the test daemon exits with "another daemon already holds" and a test
+tray hands its window to the installed one, so you appear to test the old build.
+`pgrep -a nimbus` must show nothing before the run.
+
 An `alias` remote with an absolute path is the only test remote that works. It
 resolves the same way from any working directory.
 
@@ -60,6 +71,17 @@ CONF
 
 The destination folder must exist before the first run. Google Drive creates
 folders, so this affects test remotes only.
+
+The first start writes a config with the defaults, then refuses to run, because
+`~/Nimbus` does not exist. That refusal is the signal to edit the scratch config.
+Set the watched folder, the remote, and short timers:
+
+```console
+sed -i 's|^remote = .*|remote = "drive"|; s|^local = .*|local = "/tmp/scratch/local"|; s|^interval_secs = .*|interval_secs = 60|; s|^debounce_secs = .*|debounce_secs = 3|' /tmp/scratch/cfg/nimbus/config.toml
+```
+
+Short timers matter. The defaults wait 900 seconds on the interval and 30 seconds
+on the debounce, so a manual run looks broken.
 
 ```console
 cargo build --workspace
@@ -82,6 +104,31 @@ The window needs a display. `spectacle -b -n -o shot.png` takes one screenshot o
 KDE, and `pgrep -a nimbus` confirms that a second instance of the tray exits
 instead of adding a second icon. The README links `docs/screenshot.png`, so
 replace that file when a change moves anything in the window.
+
+One state file escapes the scratch tree. The bisync listing goes to
+`~/.cache/rclone/bisync/`, because rclone derives it from the cache dir and
+neither `RCLONE_CACHE_DIR` nor `--cache-dir` moves it. Only the rclone flag
+`--workdir` moves it, and the daemon never passes that flag.
+
+The leftover is safe. The file name is a hash of the two paths, so a scratch run
+gets its own listing and cannot touch the listing of a real folder.
+
+Sweep the files by the prefix of your own scratch folder, never by a wildcard over
+the whole name. The prefix comes from the first path, so a scratch folder named
+`/tmp/scratch/local` starts every file with `tmp_scratch_local..`:
+
+```console
+rm -f ~/.cache/rclone/bisync/tmp_scratch_local..*
+```
+
+A wider pattern such as `*scratch*` also matches entries that name a real local
+folder, and it deletes those. A missing listing costs one `--resync` run to
+rebuild, because rclone finds no prior listing for the path.
+
+A run that is interrupted leaves `.lst-new` and `.lst-err` instead of `.lst`, and
+every later run answers "Bisync aborted. Must run --resync to recover." The daemon
+cannot recover on its own, because a clean run already cleared `resync_pending`.
+Set it back and restart, as the README Troubleshooting section says.
 
 ## rclone
 
