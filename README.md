@@ -94,6 +94,10 @@ first start, so start the daemon once, then edit the file and start it again.
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`. The flag clears only after a run that ends without an error. |
 
+The daemon also keeps its record of your files in `bisync/` beside the config file.
+Do not delete that directory while the daemon runs. A lost connection leaves the
+record unusable, and the daemon repairs it before the next run.
+
 A run starts when any one of these is true:
 
 - The last file change is at least `debounce_secs` old.
@@ -165,10 +169,16 @@ Two daemons are running. Only one can own the name. Stop the other one, then
 start this one again. A second daemon exits with zero, because only you can free
 the name.
 
-**rclone says "Bisync aborted. Must run --resync to recover."** rclone wants
-`--resync` and `resync_pending` is already false, so the daemon cannot recover on
-its own. Stop the daemon, set `resync_pending = true` in the config file, and
-start the daemon again.
+**rclone says "Bisync aborted. Must run --resync to recover."** A lost connection
+left rclone without a usable record of your files. The daemon repairs this on its
+own, and the next run is incremental again. It takes two runs in the worst case,
+and the second run rebuilds the record, so no action is needed. Set
+`interval_secs` low if the connection is often down, because a failed run waits for
+the interval before it retries.
+
+**The daemon stops after a crash and needs a full rebuild.** Set
+`resync_pending = true` in the config file and start the daemon again. This is the
+one case the repair cannot fix, and it is rare.
 
 **The first run fails on a test remote.** The destination folder must exist
 before the first run. Google Drive creates folders, so this affects test

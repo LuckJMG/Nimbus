@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::engine::Event;
 
 /// How a run ended. The three cases reach the tray as different words, so the
@@ -30,13 +31,22 @@ const TAIL: usize = 10;
 /// runs it on its own thread. It reads the pause flag between output lines,
 /// and it stops the process within about one second.
 pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
-    let mut child = match command(cfg).spawn() {
+    // A run that died before it finished leaves the listing unusable, and rclone
+    // answers such a run with "Must run --resync to recover." The repair runs
+    // first, so this run finds the last good listing and stays incremental. The
+    // return value is false when no listing survives, which means this run is
+    // the resync that rebuilds one.
+    let needs_resync = !repair(&config::bisync_dir());
+    let mut child = match command(cfg, needs_resync).spawn() {
         Ok(child) => child,
         Err(err) => {
             let text = format!("the daemon cannot start {PROGRAM}: {err}");
             let _ = events.send(Event::Finished {
                 outcome: Outcome::Stopped,
                 tail: vec![text],
+                // The process never ran, so it left no debris behind. The repair already ran,
+                // so the flag keeps its value from before this attempt.
+                needs_resync,
             });
             return;
         }
@@ -61,10 +71,65 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         Some(code) => Outcome::Failed(code),
         None => Outcome::Stopped,
     };
+    // A run that died leaves the listing unusable, and the next run would then
+    // demand a resync. The repair restores the last good listing first, so the
+    // next run is an ordinary incremental run.
+    if outcome != Outcome::Success {
+        repair(&config::bisync_dir());
+    }
     let _ = events.send(Event::Finished {
         outcome,
         tail: tail.into(),
+        needs_resync,
     });
+}
+
+/// Restores the listing that a failed run left unusable.
+///
+/// rclone keeps the listing in the working dir. A failed run replaces the good
+/// listing with a `.lst-new` file and leaves a lock behind, so the next run finds
+/// no prior state and demands `--resync`. The function keeps the good listing,
+/// restores it from the `.lst-old` spare when the run left none, and deletes the
+/// debris of the failed run.
+///
+/// The working dir belongs to one daemon, so every listing in it belongs to one
+/// pair of paths. Returns false when no listing survives, because then only
+/// `--resync` can build one.
+fn repair(workdir: &Path) -> bool {
+    let mut listing = false;
+    // rclone keeps one file per side, so a pair has two spares. The function
+    // must restore both, because rclone refuses a run that has only one.
+    let mut spares: Vec<PathBuf> = Vec::new();
+    let mut debris = Vec::new();
+    let Ok(entries) = std::fs::read_dir(workdir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("lst") => listing = true,
+            // The spare holds the state from before the failed run. It becomes
+            // the listing only when the failed run left none.
+            Some("lst-old") => spares.push(path),
+            Some("lst-new" | "lst-err" | "lck") => debris.push(path),
+            _ => {}
+        }
+    }
+    if !listing {
+        if spares.is_empty() {
+            return false;
+        }
+        let restored = spares
+            .iter()
+            .all(|spare| std::fs::copy(spare, spare.with_extension("lst")).is_ok());
+        if !restored {
+            return false;
+        }
+    }
+    for path in debris {
+        let _ = std::fs::remove_file(path);
+    }
+    true
 }
 
 /// Reads one line of the error output. Returns the ratio when the line carries
@@ -81,14 +146,21 @@ fn handle_line(line: &str, tail: &mut VecDeque<String>) -> Option<f64> {
 
 /// Builds the rclone command for one run. The daemon reads the
 /// error output from the process, and it discards the standard output.
-fn command(cfg: &Config) -> Command {
+fn command(cfg: &Config, needs_resync: bool) -> Command {
     let mut cmd = Command::new(PROGRAM);
     cmd.arg("bisync")
         .arg("--stats")
         .arg("1s")
         .arg("--log-level")
-        .arg("INFO");
-    if cfg.resync_pending {
+        .arg("INFO")
+        // The flag moves the listing out of the rclone cache and into a dir
+        // that the daemon owns, so the daemon can repair it after a failed run.
+        .arg("--workdir")
+        .arg(config::bisync_dir());
+    // The config flag covers the first run and a run after a failure the repair
+    // could not fix. The second condition covers a run that found no listing at
+    // all, which is the same situation seen from the other side.
+    if cfg.resync_pending || needs_resync {
         cmd.arg("--resync");
     }
     cmd.arg(cfg.local.path())
@@ -166,8 +238,31 @@ mod tests {
         format!("2026/09/29 17:41:41 ERROR : {text}")
     }
 
+    /// A working dir under the temp dir, so a test never touches the real one.
+    fn workdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nimbus-test-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the test created the working dir");
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::write(dir.join(name), text).expect("the test wrote the file");
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        std::fs::read_to_string(dir.join(name)).expect("the test read the file")
+    }
+
+    fn exists(dir: &Path, name: &str) -> bool {
+        dir.join(name).exists()
+    }
+
+    fn gone(dir: &Path, name: &str) -> bool {
+        !exists(dir, name)
+    }
+
     fn args_of(cfg: &Config) -> Vec<String> {
-        command(cfg)
+        command(cfg, false)
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
@@ -221,6 +316,21 @@ mod tests {
             !args.iter().any(|arg| arg == "--resync"),
             "a later run must not resync"
         );
+    }
+
+    // The repair found no listing, so the run rebuilds one even though a clean run
+    // already cleared the config flag. Without this the daemon would report the
+    // same refusal forever.
+    #[test]
+    fn a_missing_listing_makes_the_run_resync() {
+        let cfg = Config {
+            resync_pending: false,
+            ..Config::default()
+        };
+        let kept = command(&cfg, false).get_args().any(|arg| arg == "--resync");
+        assert!(!kept, "a surviving listing keeps the run incremental");
+        let rebuilt = command(&cfg, true).get_args().any(|arg| arg == "--resync");
+        assert!(rebuilt, "no listing must rebuild one");
     }
 
     #[test]
@@ -308,6 +418,109 @@ mod tests {
     #[test]
     fn parse_error_ignores_a_notice_line() {
         assert_eq!(parse_error(NOTICE_LINE), None);
+    }
+
+    // Without the flag the listing stays in the rclone cache, where the daemon
+    // cannot repair it after a failed run.
+    #[test]
+    fn the_command_points_the_listing_at_the_bisync_dir() {
+        let args = args_of(&Config::default());
+        let at = args.iter().position(|arg| arg == "--workdir");
+        let want = config::bisync_dir();
+        assert_eq!(
+            at.map(|i| PathBuf::from(&args[i + 1])),
+            Some(want),
+            "the daemon must own the dir that holds the listing"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "--resilient"),
+            "the flag lies about a retryable error"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "--recover"),
+            "the flag does not recover a lost listing"
+        );
+    }
+
+    #[test]
+    fn a_good_listing_survives_and_the_debris_goes() {
+        let dir = workdir("good-listing");
+        write(&dir, "pair.path1.lst", "one");
+        write(&dir, "pair.path2.lst", "two");
+        write(&dir, "pair.path1.lst-new", "half");
+        write(&dir, "pair.path2.lst-err", "boom");
+        write(&dir, "pair.lck", "lock");
+        assert!(repair(&dir), "the good listing is enough");
+        assert_eq!(read(&dir, "pair.path1.lst"), "one");
+        assert_eq!(read(&dir, "pair.path2.lst"), "two");
+        assert!(gone(&dir, "pair.path1.lst-new"), "the debris must go");
+        assert!(gone(&dir, "pair.path2.lst-err"), "the debris must go");
+        assert!(gone(&dir, "pair.lck"), "the stale lock must go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A failed run can leave no listing at all, and only the spare holds the
+    // state from before the run.
+    #[test]
+    fn the_spare_restores_a_missing_listing() {
+        let dir = workdir("spare");
+        write(&dir, "pair.path1.lst-old", "one");
+        write(&dir, "pair.path2.lst-old", "two");
+        write(&dir, "pair.path1.lst-new", "half");
+        assert!(repair(&dir), "the spare is a listing");
+        assert_eq!(read(&dir, "pair.path1.lst"), "one");
+        assert_eq!(read(&dir, "pair.path2.lst"), "two");
+        assert!(gone(&dir, "pair.path1.lst-new"), "the debris must go");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A present listing is newer than the spare, so the spare stays a spare.
+    #[test]
+    fn a_present_listing_wins_over_the_spare() {
+        let dir = workdir("newer");
+        write(&dir, "pair.path1.lst", "current");
+        write(&dir, "pair.path1.lst-old", "older");
+        assert!(repair(&dir));
+        assert_eq!(read(&dir, "pair.path1.lst"), "current");
+        assert!(
+            exists(&dir, "pair.path1.lst-old"),
+            "the spare stays as a backup"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // No listing and no spare leaves nothing to compare against. Only a resync
+    // can rebuild the state, so the function reports false.
+    #[test]
+    fn no_listing_and_no_spare_needs_a_resync() {
+        let dir = workdir("empty");
+        write(&dir, "pair.path1.lst-new", "half");
+        write(&dir, "pair.lck", "lock");
+        assert!(!repair(&dir), "only --resync can rebuild this");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_workdir_needs_a_resync() {
+        let dir = workdir("gone");
+        assert!(!repair(&dir), "the dir does not exist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The lock belongs to the working dir that one daemon owns, so a lock in it
+    // can only be the lock of a run that died.
+    #[test]
+    fn a_partial_file_is_not_touched() {
+        let dir = workdir("partial");
+        write(&dir, "pair.path1.lst", "one");
+        write(&dir, "pair.path1.lst-new", "half");
+        write(&dir, "big.bin.7f415a38.partial", "in flight");
+        assert!(repair(&dir));
+        assert!(
+            exists(&dir, "big.bin.7f415a38.partial"),
+            "rclone owns the partial file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

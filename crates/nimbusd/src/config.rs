@@ -100,6 +100,16 @@ pub fn default_file() -> PathBuf {
     path_in(&config_home())
 }
 
+/// The working dir that rclone keeps its bisync listing in.
+///
+/// The dir sits beside the config file, so a test that sets `XDG_CONFIG_HOME`
+/// also moves the listing. rclone creates the dir on the first run, and it
+/// writes one set of listing files per pair of paths, so the daemon finds the
+/// files by pattern instead of building rclone's own file name.
+pub fn bisync_dir() -> PathBuf {
+    config_home().join("nimbus").join("bisync")
+}
+
 /// Writes a new file when the file does not exist.
 pub fn load() -> Result<Config> {
     load_from(&default_file())

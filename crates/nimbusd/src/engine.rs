@@ -18,8 +18,13 @@ pub enum Event {
     Changed,
     /// The ratio is from 0.0 to 1.0.
     Progress(f64),
-    /// The tail holds the last error messages.
-    Finished { outcome: Outcome, tail: Vec<String> },
+    /// The tail holds the last error messages. The flag asks for a resync on
+    /// the next run, because the run left no listing to build one from.
+    Finished {
+        outcome: Outcome,
+        tail: Vec<String>,
+        needs_resync: bool,
+    },
 }
 
 /// The state machine of the daemon. This struct decides when a run starts and
@@ -74,7 +79,11 @@ impl Engine {
             Event::SetPaused(paused) => self.set_paused(paused),
             Event::Changed => self.last_change = Some(now),
             Event::Progress(ratio) => self.on_progress(ratio),
-            Event::Finished { outcome, tail } => self.on_finished(outcome, &tail, now, unix),
+            Event::Finished {
+                outcome,
+                tail,
+                needs_resync,
+            } => self.on_finished(outcome, &tail, needs_resync, now, unix),
         }
     }
 
@@ -137,7 +146,14 @@ impl Engine {
         self.state.phase = Phase::Syncing;
     }
 
-    fn on_finished(&mut self, outcome: Outcome, tail: &[String], now: Instant, unix: u64) {
+    fn on_finished(
+        &mut self,
+        outcome: Outcome,
+        tail: &[String],
+        needs_resync: bool,
+        now: Instant,
+        unix: u64,
+    ) {
         self.running = false;
         self.last_finish = Some(now);
         self.state.last_run = unix;
@@ -162,6 +178,13 @@ impl Engine {
         }
         self.state.phase = Phase::Error;
         self.state.last_error = last_error_text(outcome, tail);
+        // The run left no listing, so rclone refuses the next run until it
+        // resyncs. Setting the flag here is what makes the daemon recover from
+        // a lost connection on its own.
+        if needs_resync && !self.cfg.resync_pending {
+            self.cfg.resync_pending = true;
+            self.dirty = true;
+        }
     }
 }
 
@@ -202,9 +225,29 @@ mod tests {
         Engine::new(cfg)
     }
 
+    /// Ends a run that left a listing behind, which is every run that did not
+    /// need a resync.
     fn done(engine: &mut Engine, at: Instant, outcome: Outcome, tail: &[&str]) {
+        finished(engine, at, outcome, tail, false);
+    }
+
+    fn finished(
+        engine: &mut Engine,
+        at: Instant,
+        outcome: Outcome,
+        tail: &[&str],
+        needs_resync: bool,
+    ) {
         let tail = tail.iter().map(|line| String::from(*line)).collect();
-        engine.on_event(Event::Finished { outcome, tail }, at, UNIX);
+        engine.on_event(
+            Event::Finished {
+                outcome,
+                tail,
+                needs_resync,
+            },
+            at,
+            UNIX,
+        );
     }
 
     #[test]
@@ -335,11 +378,60 @@ mod tests {
         assert!(e.take_dirty(), "the daemon must write the config file");
     }
 
+    // A run that left a listing behind is already recoverable, because rclone
+    // compares against that listing on the next run.
     #[test]
     fn a_failed_run_keeps_the_resync_flag() {
         let mut e = engine(|cfg| cfg.resync_pending = true);
         done(&mut e, Instant::now(), Outcome::Failed(7), &[]);
         assert!(e.config().resync_pending, "a failed resync must repeat");
+    }
+
+    #[test]
+    fn a_failed_run_that_kept_its_listing_does_not_ask_for_a_resync() {
+        // The default config carries resync_pending, so the test starts from a
+        // settled state where a clean run has already cleared the flag.
+        let mut e = engine(|cfg| cfg.resync_pending = false);
+        done(&mut e, Instant::now(), Outcome::Failed(7), &[]);
+        assert!(
+            !e.config().resync_pending,
+            "the repair kept a listing, so no resync is needed"
+        );
+        assert!(!e.take_dirty(), "the config file must not change");
+    }
+
+    // The repair fails when the run left no listing at all. The next run has
+    // nothing to compare against, so it must resync or rclone refuses forever.
+    #[test]
+    fn a_failed_run_without_a_listing_asks_for_a_resync() {
+        let mut e = engine(|cfg| cfg.resync_pending = false);
+        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
+        assert!(e.config().resync_pending, "the next run must resync");
+        assert!(e.take_dirty(), "the daemon must write the config file");
+    }
+
+    #[test]
+    fn a_resync_recovers_the_daemon() {
+        let at = Instant::now();
+        let mut e = engine(|cfg| {
+            cfg.interval_secs = 100_000;
+            cfg.resync_pending = false;
+        });
+        finished(&mut e, at, Outcome::Failed(7), &[], true);
+        done(&mut e, at, Outcome::Success, &[]);
+        assert!(!e.config().resync_pending, "the clean run cleared it");
+        assert_eq!(e.snapshot().phase, Phase::Idle);
+    }
+
+    // The flag is already set when a second failure arrives, so the config file
+    // is written once instead of on every failed run.
+    #[test]
+    fn a_repeated_failure_does_not_rewrite_the_config() {
+        let mut e = engine(|cfg| cfg.resync_pending = false);
+        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
+        assert!(e.take_dirty(), "the first failure writes the flag");
+        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
+        assert!(!e.take_dirty(), "the flag was already set");
     }
 
     #[test]

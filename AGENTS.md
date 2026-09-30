@@ -31,7 +31,7 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 83 tests pass today: 2 in `nimbus-ipc`, 53 in the `nimbusd`
+runs the same three. 95 tests pass today: 2 in `nimbus-ipc`, 65 in the `nimbusd`
 library, 2 in the `nimbusd` binary, and 26 in `nimbus`.
 
 ```console
@@ -105,30 +105,14 @@ KDE, and `pgrep -a nimbus` confirms that a second instance of the tray exits
 instead of adding a second icon. The README links `docs/screenshot.png`, so
 replace that file when a change moves anything in the window.
 
-One state file escapes the scratch tree. The bisync listing goes to
-`~/.cache/rclone/bisync/`, because rclone derives it from the cache dir and
-neither `RCLONE_CACHE_DIR` nor `--cache-dir` moves it. Only the rclone flag
-`--workdir` moves it, and the daemon never passes that flag.
+The listing lives in `$XDG_CONFIG_HOME/nimbus/bisync`, because `rclone.rs` passes
+`--workdir`. Before that flag existed the listing stayed in the rclone cache dir,
+which no daemon variable moves. A scratch run therefore keeps every file inside
+the scratch tree, and no state reaches the real cache.
 
-The leftover is safe. The file name is a hash of the two paths, so a scratch run
-gets its own listing and cannot touch the listing of a real folder.
-
-Sweep the files by the prefix of your own scratch folder, never by a wildcard over
-the whole name. The prefix comes from the first path, so a scratch folder named
-`/tmp/scratch/local` starts every file with `tmp_scratch_local..`:
-
-```console
-rm -f ~/.cache/rclone/bisync/tmp_scratch_local..*
-```
-
-A wider pattern such as `*scratch*` also matches entries that name a real local
-folder, and it deletes those. A missing listing costs one `--resync` run to
-rebuild, because rclone finds no prior listing for the path.
-
-A run that is interrupted leaves `.lst-new` and `.lst-err` instead of `.lst`, and
-every later run answers "Bisync aborted. Must run --resync to recover." The daemon
-cannot recover on its own, because a clean run already cleared `resync_pending`.
-Set it back and restart, as the README Troubleshooting section says.
+If you test against a folder that an older build already synced, the listing in
+`~/.cache/rclone/bisync` is now unused. Delete it after the new dir holds a
+healthy `.lst`.
 
 ## rclone
 
@@ -138,9 +122,11 @@ on the assumption they are decoration.
 - Only `--stats 1s` **with** `--log-level INFO` writes progress into a pipe. Without the level, rclone writes nothing and no error appears. A test asserts both flags.
 - `--stats-one-line` emits nothing in a pipe. `--progress` drops the line separators, so a line reader merges two updates into one. Both are wrong here.
 - Progress arrives on stderr. The command nulls stdout, so the child can never block on a full pipe.
-- `--resync` is required on the first run, and on the first run after a failure. `resync_pending` in the config tracks it and clears only after a run that ends without an error.
+- `--resync` is required on the first run, and after a failure that left no listing to repair. `resync_pending` in the config tracks the first case and clears only after a run that ends without an error. See "A lost connection" below.
 - Error lines carry ANSI colour codes even in a pipe. `strip_ansi` removes them before the text reaches the tray.
 - Two lines start with `Transferred:`. Only the byte line has a percentage, and only the byte line parses.
+- The command passes `--workdir`, which points the listing at `$XDG_CONFIG_HOME/nimbus/bisync`. rclone creates the dir, so the daemon does not. The flag is also what lets `repair` find the files.
+- Do not add `--recover` or `--resilient`. A live run measured both. Neither one restores a lost listing, and `--resilient` prints "retryable without --resync" and then fails on the next run anyway.
 
 For a live test, a `local` rclone remote with no root resolves `name:path` against
 the **process** working directory, and the destination folder must already exist.
@@ -167,6 +153,42 @@ Six derives, and the reason for four of them is not visible in the code.
 - `Phase` and `State` need `Serialize`, because `Connection::emit_signal` takes a payload that implements it. Without the derive the daemon cannot send `Changed`.
 - `State` needs `Value` for the property getter, and `PartialEq` for the change check in the main loop.
 - `state_signature_is_stable` pins the wire signature to `(sdts)`. A reorder compiles cleanly and breaks every client at runtime.
+
+## A lost connection
+
+A dropped connection leaves the bisync listing unusable. rclone then answers every
+later run with "Bisync aborted. Must run --resync to recover." Three shapes were
+reproduced, and all three are measured, not guessed.
+
+| Shape | The working dir holds | Only a resync helps |
+| --- | --- | --- |
+| A. the run died during transfer | `.lst`, `.lst-new`, `.lck` | no |
+| B. the run died after the listing | `.lst-old`, `.lst-new` | no |
+| C. the run died before any listing | `.lst-new`, `.lst-err` | yes |
+
+`repair` in `rclone.rs` runs **before** the child process, not after the failure.
+That order is the whole design. A repair after the failure cleans up for the *next*
+run, so the run that follows a crash still fails once. A repair before the run
+makes the run itself incremental.
+
+The function keeps a `.lst`, restores one from a `.lst-old` spare when no `.lst`
+survives, and deletes the `.lst-new`, `.lst-err`, and `.lck` debris. It returns
+false only in shape C, and the caller then adds `--resync` to that run. The spare
+is never deleted, so it stays as a backup for the next crash.
+
+Two traps in that function:
+
+- rclone keeps one file per side, so a pair has two spares. Keeping only the last
+  one restores half the pair, and rclone still refuses. `spare_restores_a_missing_listing` covers this.
+- The function must not restore a `.lst-old` over a `.lst` that exists. The present listing is the newer state, and the spare is older. `a_present_listing_wins_over_the_spare` covers this.
+
+The engine also sets `resync_pending` when a run asks for one, so the flag survives
+a restart. That path is the fallback for shape C and it costs one full pass over
+both sides, which is why the repair avoids it in shapes A and B.
+
+A file that changes on both sides during an outage does not lose data. rclone writes
+`name.conflict1` and `name.conflict2`, and both copies survive on both sides. A live
+run confirmed it.
 
 ## The engine lock
 
@@ -217,6 +239,16 @@ A host looks an icon name up in its own cache, and the cache does not know an ic
 that was installed after the last rebuild. So `Icon::resolve` returns the installed
 **directory**, not an empty theme path. A live run on KDE showed a blank tray item
 until this was fixed, and no unit test could have found it.
+
+The icon has no color of its own, and the tray cannot give it one. SNI sends a name
+and a path, and no host reads a color from either, so each host recolors the file
+instead. Both need a hook in the SVG.
+
+- KDE rewrites the `<style>` element whose id is `current-color-scheme`, when the icon theme sets `FollowsColorScheme`, which Breeze does. The paths take the color through `.ColorScheme-Text` and `stroke="currentColor"`.
+- GTK marks an icon symbolic from the `-symbolic` file name suffix. It then overrides `fill` and `stroke` from the `class` attribute, and it ignores the presentation attributes. So the class list must carry `transparent-fill` and `foreground-stroke`, or the outline renders filled or not at all.
+
+`currentColor` alone resolves to black in a standalone file, on every desktop. A
+live run on KDE showed a black icon on a dark panel until this was fixed.
 
 The heading of the window takes `status_name`, which is the short name. The line
 below it takes the error from `state.last_error`. The tooltip takes `status_text`,
@@ -278,6 +310,8 @@ stays as a second line of defence.
 
 ## Design limits, not bugs
 
+- A lost connection is repaired on the next run, and only shape C costs a resync. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
+- A failed run waits for the next `interval_secs` before it retries. There is no separate retry timer, so set `interval_secs` low if the connection is often down.
 - The watcher sees only the local folder. A change made from another machine arrives on `interval_secs` (default 900), not sooner.
 - `is_trigger` drops `Access` and `Any` events. rclone reads the local folder during every run, so a filter that accepts reads never stops syncing.
 - Pause does not stop a running sync. It skips later runs. The run thread checks the flag between output lines, so a pause lands within about a second.
