@@ -170,6 +170,7 @@ fn refresh_loop(ui: &Rc<Ui>, app: &Rc<window::App>, requests: Receiver<()>) {
     // The window outlives the timer only if the host keeps it. A weak
     // reference lets the timer find out instead of assuming.
     let weak: WeakRef<gtk::Window> = WeakRef::new();
+    weak.set(Some(&app.root));
     let view = Arc::clone(&ui.view);
     let shown = Rc::clone(app);
     let mut last: Option<View> = None;
