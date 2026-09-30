@@ -245,7 +245,62 @@ Six traps, all hit and all fixed. Read these before touching `main.rs`.
 - `handle.update()` reads the view on a thread of the tray service. It must stay **outside** the view lock. Inside it, the update waits for the lock that the update itself holds, and the first menu click hangs.
 - An `activate` callback runs on a thread of the tray service. It must not block. It only sends on a channel.
 - `glib::MainContext::channel` does not exist in glib 0.22. The window is woken by one `glib::timeout_add_local` timer, which also refreshes the labels.
-- `glib::WeakRef::new()` takes no argument in glib 0.22. The type comes from the later `upgrade` call, so the binding needs a type annotation.
+- `glib::WeakRef::new()` takes no argument in glib 0.22, so the binding needs a type annotation. It returns an **empty** reference, and `upgrade` returns `None` until `set` names an object. A tray click reached the window through this reference, so every click after the first did nothing. The comments on `refresh_loop` and on `App::root` described the intent, and the code did not follow.
+
+## The tray raise
+
+A tray click raises the window only while it is hidden. Three live runs on KWin 6
+measured the rest, and each of these is a measurement rather than a guess.
+
+`gtk_window_present` ends in `gdk_toplevel_focus`, and on Wayland that reaches
+`gdk_wayland_toplevel_focus`, which anchors the activation token on
+`_gdk_wayland_seat_get_last_implicit_grab_serial()`. That serial comes from a
+keyboard grab inside the process. A tray click lands on the panel, so there is no
+grab, the token proves nothing, and KWin drops the request. The window then neither
+raises nor focuses, and a minimized window stays minimized.
+
+| State at the click | What happens | Why |
+| --- | --- | --- |
+| hidden | comes to the front | the map is new, and KWin places a new surface on top |
+| visible, behind another window | stays where it is | a raise needs a token, and none is valid |
+| minimized | stays minimized | same reason |
+
+`set_visible(false)` followed by `present()` in one tick does not change any of it.
+The probe printed `visible=true mapped=true` and `active=false` after a full unmap
+and a fresh map, and the screenshot showed the window still behind the terminal. It
+also flickered on every click, because `is_active()` is false even for a focused
+window, so a guard on it never skips. Do not try it again.
+
+Plasma does offer a token. `dbus-monitor` on the item interface shows the panel
+sending this on every click, immediately before `Activate`:
+
+```
+member=ProvideXdgActivationToken
+   string "kwin-171"
+member=Activate
+```
+
+`ksni` never implemented that method, so the call returns `UnknownMethod` and the
+token is lost. Calling it by hand confirms the gap:
+
+```console
+gdbus call --session --dest org.kde.StatusNotifierItem-$PID-1 \
+  --object-path /StatusNotifierItem \
+  --method org.kde.StatusNotifierItem.ProvideXdgActivationToken test
+```
+
+A fix would buffer the token and pass it to `gtk_window_set_startup_id` before
+`present()`. `gdk_wayland_toplevel_focus` steals that value first, so no hand-rolled
+Wayland is needed. It needs one of three things, and none of them is small:
+
+- Vendor `ksni` and add the method to its interface.
+- Replace `ksni` with an own SNI server.
+- Wait for `ksni` upstream.
+
+On GNOME there is no `ProvideXdgActivationToken` at all, so the buffer would stay
+empty and the behaviour falls back to what it is now. Telegram Desktop takes the
+first route, which is why its tray icon raises the window and an Electron one does
+not.
 
 `connect_activate` takes an `Fn`, not an `FnOnce`. The first call moves the worker
 into a thread, so the worker parts sit in a `RefCell` inside the captured state and
@@ -349,6 +404,7 @@ stays as a second line of defence.
 - The `sync` mode was removed on purpose. `rclone sync` deletes remote files that are missing locally, and `bisync` reports conflicts instead.
 - The tray reads the state every 2 seconds instead of listening for `Changed`. A failed read is how the tray learns that the daemon stopped, because a dropped signal looks the same as an idle daemon.
 - The panel can drop the tray item, for example on a panel reload. The tray logs the event and stays up, because the window still works. A panel reload brings the icon back.
+- A tray click raises the window only while it is hidden. A visible window keeps its place, and a minimized one stays minimized. The compositor decides this, and it needs an `xdg_activation_token_v1`. The details are in "The tray raise" below.
 
 ## Comments
 

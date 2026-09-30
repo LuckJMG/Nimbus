@@ -116,7 +116,10 @@ The Troubleshooting section covers that case.
 ## Use
 
 The tray icon sits in the panel. A left click opens the window. A right click
-opens the menu:
+opens the menu. On Wayland, a left click brings the window to the front only when
+the window is closed. A window that is already open keeps its place, because the
+compositor refuses a raise without a click of its own. The taskbar entry flashes
+instead.
 
 | Item | What it does |
 | --- | --- |
