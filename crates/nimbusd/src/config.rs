@@ -3,14 +3,31 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
+/// The local folder. The value keeps the text from the file, so a leading
+/// tilde survives a round trip. Call `path` for the folder that the daemon
+/// opens, because rclone cannot open a path that starts with a tilde.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDir(PathBuf);
+
+impl LocalDir {
+    /// Builds the value from the text in the file. The text keeps a tilde.
+    pub fn new(raw: &Path) -> Self {
+        Self(raw.to_path_buf())
+    }
+
+    /// The folder with a leading tilde replaced by the home directory.
+    pub fn path(&self) -> PathBuf {
+        expand_tilde(&self.0)
+    }
+}
+
 /// The daemon reads this file at start.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub remote: String,
     /// The folder in the remote.
     pub path: String,
-    /// The local folder.
-    pub local: PathBuf,
+    pub local: LocalDir,
     /// A run that is active finishes. Later runs wait for a resume.
     pub paused: bool,
     /// The longest gap between two runs. The time counts from the end of the
@@ -29,7 +46,7 @@ impl Default for Config {
         Self {
             remote: String::from("gdrive"),
             path: String::from("Nimbus"),
-            local: PathBuf::from("~/Nimbus"),
+            local: LocalDir::new(Path::new("~/Nimbus")),
             paused: false,
             interval_secs: 900,
             debounce_secs: 30,
@@ -63,55 +80,49 @@ impl Config {
             self.debounce_secs > 0,
             "the config key debounce_secs is zero. Set a time above zero."
         );
+        let local = self.local.path();
         ensure!(
-            self.local.is_dir(),
+            local.is_dir(),
             "the local directory {} does not exist. Create the directory, or set the config key local to a directory that exists.",
-            self.local.display()
+            local.display()
         );
         Ok(())
     }
 }
 
 /// A test passes a temporary directory.
-pub fn path_in(base: &Path) -> PathBuf {
+fn path_in(base: &Path) -> PathBuf {
     base.join("nimbus").join("config.toml")
 }
 
-/// The daemon prints this path when it cannot use the settings.
-pub fn path() -> PathBuf {
+/// The config file at the default location.
+pub fn default_file() -> PathBuf {
     path_in(&config_home())
 }
 
 /// Writes a new file when the file does not exist.
 pub fn load() -> Result<Config> {
-    load_from(&path_in(&config_home()))
+    load_from(&default_file())
 }
 
 /// A test passes a temporary path.
-pub fn load_from(file: &Path) -> Result<Config> {
+fn load_from(file: &Path) -> Result<Config> {
     if !file.exists() {
-        let mut cfg = Config::default();
-        // The file keeps the tilde, because the user reads and edits it. The
-        // copy in memory holds the real path, because rclone cannot open a
-        // path that starts with a tilde.
+        let cfg = Config::default();
         save_to(&cfg, file)?;
-        cfg.local = expand_tilde(&cfg.local);
         return Ok(cfg);
     }
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("the daemon cannot read {}", file.display()))?;
-    let mut cfg: Config = toml::from_str(&text)
-        .with_context(|| format!("the daemon cannot parse {}", file.display()))?;
-    cfg.local = expand_tilde(&cfg.local);
-    Ok(cfg)
+    toml::from_str(&text).with_context(|| format!("the daemon cannot parse {}", file.display()))
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
-    save_to(cfg, &path_in(&config_home()))
+    save_to(cfg, &default_file())
 }
 
 /// A test passes a temporary path.
-pub fn save_to(cfg: &Config, file: &Path) -> Result<()> {
+fn save_to(cfg: &Config, file: &Path) -> Result<()> {
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("the daemon cannot create {}", parent.display()))?;
@@ -124,7 +135,7 @@ pub fn save_to(cfg: &Config, file: &Path) -> Result<()> {
 
 /// Replaces a leading ~ with the value of the home directory. The path stays
 /// as it is when HOME is not set.
-pub fn expand_tilde(raw: &Path) -> PathBuf {
+fn expand_tilde(raw: &Path) -> PathBuf {
     let Some(text) = raw.to_str() else {
         return raw.to_path_buf();
     };
@@ -153,30 +164,44 @@ mod tests {
     }
 
     #[test]
-    fn expand_tilde_keeps_an_absolute_path() {
-        assert_eq!(
-            expand_tilde(Path::new("/srv/Nimbus")),
-            Path::new("/srv/Nimbus")
-        );
+    fn a_local_dir_keeps_an_absolute_path() {
+        let dir = LocalDir::new(Path::new("/srv/Nimbus"));
+        assert_eq!(dir.path(), Path::new("/srv/Nimbus"));
     }
 
     #[test]
-    fn expand_tilde_keeps_a_relative_path() {
-        assert_eq!(
-            expand_tilde(Path::new("data/Nimbus")),
-            Path::new("data/Nimbus")
-        );
+    fn a_local_dir_keeps_a_relative_path() {
+        let dir = LocalDir::new(Path::new("data/Nimbus"));
+        assert_eq!(dir.path(), Path::new("data/Nimbus"));
     }
 
     #[test]
-    fn expand_tilde_replaces_the_home_mark() {
+    fn a_local_dir_replaces_the_home_mark() {
         let Some(home) = std::env::var_os("HOME") else {
             return;
         };
-        assert_eq!(
-            expand_tilde(Path::new("~/Nimbus")),
-            Path::new(&home).join("Nimbus")
+        let dir = LocalDir::new(Path::new("~/Nimbus"));
+        assert_eq!(dir.path(), Path::new(&home).join("Nimbus"));
+    }
+
+    // The file must keep the tilde, because the user reads and edits the file.
+    // rclone needs the real path, because it cannot open one that starts with
+    // a tilde. One type keeps the text, and `path` hands out the folder.
+    #[test]
+    fn the_file_keeps_the_tilde_and_the_path_drops_it() {
+        let base = temp_base("tilde");
+        let file = path_in(&base);
+        let cfg = Config::default();
+        save_to(&cfg, &file).expect("the daemon wrote the config file");
+        let got = load_from(&file).expect("the daemon read the config file");
+        let on_disk = std::fs::read_to_string(&file).expect("the daemon read the config file");
+        assert!(
+            on_disk.contains("~/Nimbus"),
+            "the file keeps the tilde for the user"
         );
+        assert_eq!(got.local, cfg.local, "the loaded value is the raw text");
+        assert_eq!(got.local.path(), cfg.local.path());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -186,7 +211,7 @@ mod tests {
         let want = Config {
             remote: String::from("my-drive"),
             path: String::from("Notes/Daily"),
-            local: PathBuf::from("/srv/notes"),
+            local: LocalDir::new(Path::new("/srv/notes")),
             paused: true,
             interval_secs: 60,
             debounce_secs: 5,
@@ -208,22 +233,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // The default holds a tilde. A daemon that keeps the tilde reports a path
-    // that does not exist, and rclone receives a path it cannot open.
-    #[test]
-    fn a_new_config_expands_the_home_mark() {
-        let base = temp_base("expand-new");
-        let file = path_in(&base);
-        let cfg = load_from(&file).expect("the daemon created a config file");
-        assert_eq!(cfg.local, expand_tilde(Path::new("~/Nimbus")));
-        let on_disk = std::fs::read_to_string(&file).expect("the daemon read the config file");
-        assert!(
-            on_disk.contains("~/Nimbus"),
-            "the file keeps the tilde for the user"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     #[test]
     fn a_new_config_reports_the_remote_path() {
         let cfg = Config::default();
@@ -233,7 +242,7 @@ mod tests {
     #[test]
     fn check_accepts_an_existing_local_directory() {
         let cfg = Config {
-            local: std::env::temp_dir(),
+            local: LocalDir::new(&std::env::temp_dir()),
             ..Config::default()
         };
         cfg.check().expect("the default config is valid");
@@ -275,7 +284,7 @@ mod tests {
     #[test]
     fn check_rejects_a_missing_local_directory() {
         let cfg = Config {
-            local: PathBuf::from("/nimbus-no-such-directory"),
+            local: LocalDir::new(Path::new("/nimbus-no-such-directory")),
             ..Config::default()
         };
         assert!(

@@ -8,6 +8,18 @@ use std::sync::mpsc::Sender;
 use crate::config::Config;
 use crate::engine::Event;
 
+/// How a run ended. The three cases reach the tray as different words, so the
+/// run thread names them once instead of passing a bare exit code around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// rclone exited with code zero.
+    Success,
+    /// rclone exited with this code.
+    Failed(i32),
+    /// rclone ended with no exit code, for example after a signal.
+    Stopped,
+}
+
 const PROGRAM: &str = "rclone";
 
 /// The daemon keeps this many error messages for the tray. The oldest message
@@ -23,7 +35,7 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         Err(err) => {
             let text = format!("the daemon cannot start {PROGRAM}: {err}");
             let _ = events.send(Event::Finished {
-                code: None,
+                outcome: Outcome::Stopped,
                 tail: vec![text],
             });
             return;
@@ -40,26 +52,36 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
             let _ = child.kill();
             break;
         }
-        if let Some(ratio) = parse_progress(&line) {
+        if let Some(ratio) = handle_line(&line, &mut tail) {
             let _ = events.send(Event::Progress(ratio));
         }
-        if let Some(text) = parse_error(&line) {
-            if tail.len() == TAIL {
-                tail.pop_front();
-            }
-            tail.push_back(text);
-        }
     }
-    let code = child.wait().ok().and_then(|status| status.code());
+    let outcome = match child.wait().ok().and_then(|status| status.code()) {
+        Some(0) => Outcome::Success,
+        Some(code) => Outcome::Failed(code),
+        None => Outcome::Stopped,
+    };
     let _ = events.send(Event::Finished {
-        code,
+        outcome,
         tail: tail.into(),
     });
 }
 
+/// Reads one line of the error output. Returns the ratio when the line carries
+/// a percentage, and keeps the line in the tail when it carries an error.
+fn handle_line(line: &str, tail: &mut VecDeque<String>) -> Option<f64> {
+    if let Some(text) = parse_error(line) {
+        if tail.len() == TAIL {
+            tail.pop_front();
+        }
+        tail.push_back(text);
+    }
+    parse_progress(line)
+}
+
 /// Builds the rclone command for one run. The daemon reads the
 /// error output from the process, and it discards the standard output.
-pub fn command(cfg: &Config) -> Command {
+fn command(cfg: &Config) -> Command {
     let mut cmd = Command::new(PROGRAM);
     cmd.arg("bisync")
         .arg("--stats")
@@ -69,7 +91,7 @@ pub fn command(cfg: &Config) -> Command {
     if cfg.resync_pending {
         cmd.arg("--resync");
     }
-    cmd.arg(&cfg.local)
+    cmd.arg(cfg.local.path())
         .arg(cfg.remote_path())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -78,7 +100,7 @@ pub fn command(cfg: &Config) -> Command {
 
 /// Reads the ratio from one rclone stats line. The ratio is a value from 0.0
 /// to 1.0. Returns nothing when the line has no percentage.
-pub fn parse_progress(line: &str) -> Option<f64> {
+fn parse_progress(line: &str) -> Option<f64> {
     let rest = line.strip_prefix("Transferred:")?;
     let (left, _) = rest.split_once("%, ")?;
     left.rsplit(' ')
@@ -90,7 +112,7 @@ pub fn parse_progress(line: &str) -> Option<f64> {
 
 /// Reads the error text from one rclone log line. Returns nothing when the
 /// line has no error.
-pub fn parse_error(line: &str) -> Option<String> {
+fn parse_error(line: &str) -> Option<String> {
     let (_, rest) = line.split_once("ERROR : ")?;
     let clean = strip_ansi(rest);
     let text = clean.trim();
@@ -100,7 +122,7 @@ pub fn parse_error(line: &str) -> Option<String> {
 // ponytail: this function removes CSI sequences only. rclone does not emit
 // another escape sequence. Add OSC support if a backend starts to color a
 // path.
-pub fn strip_ansi(text: &str) -> String {
+fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
@@ -119,9 +141,10 @@ pub fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::Path;
 
     use super::*;
+    use crate::config::LocalDir;
 
     // These lines come from a rclone 1.74.3 run. The byte line and the count
     // line both start with Transferred, and only the byte line has a
@@ -138,6 +161,10 @@ mod tests {
         "2026/09/29 17:41:41 ERROR : Local file system at /nope: directory not found";
     const COLOR_ERROR_LINE: &str =
         "2026/09/29 17:41:41 ERROR : \x1b[31mBisync critical error: directory not found\x1b[0m";
+
+    fn error(text: &str) -> String {
+        format!("2026/09/29 17:41:41 ERROR : {text}")
+    }
 
     fn args_of(cfg: &Config) -> Vec<String> {
         command(cfg)
@@ -201,12 +228,30 @@ mod tests {
         let cfg = Config {
             remote: String::from("gdrive"),
             path: String::from("Nimbus"),
-            local: PathBuf::from("/home/luck/Nimbus"),
+            local: LocalDir::new(Path::new("/home/luck/Nimbus")),
             ..Config::default()
         };
         let args = args_of(&cfg);
         assert_eq!(args[args.len() - 2], "/home/luck/Nimbus");
         assert_eq!(args[args.len() - 1], "gdrive:Nimbus");
+    }
+
+    // rclone cannot open a path that starts with a tilde, so the command must
+    // carry the expanded folder.
+    #[test]
+    fn the_command_expands_the_home_mark() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let cfg = Config {
+            local: LocalDir::new(Path::new("~/Nimbus")),
+            ..Config::default()
+        };
+        let args = args_of(&cfg);
+        assert_eq!(
+            args[args.len() - 2],
+            Path::new(&home).join("Nimbus").to_str().unwrap()
+        );
     }
 
     #[test]
@@ -274,5 +319,25 @@ mod tests {
     fn strip_ansi_keeps_plain_text() {
         assert_eq!(strip_ansi("plain text"), "plain text");
         assert_eq!(strip_ansi(""), "");
+    }
+
+    // The tray shows one error line, so the tail must drop the oldest message
+    // when it is full.
+    #[test]
+    fn the_tail_keeps_the_last_ten_errors() {
+        let mut tail = VecDeque::new();
+        for n in 0..TAIL + 5 {
+            handle_line(&error(&format!("error {n}")), &mut tail);
+        }
+        assert_eq!(tail.len(), TAIL, "the tail must not grow past the limit");
+        assert_eq!(tail.front().map(String::as_str), Some("error 5"));
+        assert_eq!(tail.back().map(String::as_str), Some("error 14"));
+    }
+
+    #[test]
+    fn a_stats_line_carries_no_error() {
+        let mut tail = VecDeque::new();
+        assert_eq!(handle_line(BYTE_LINE, &mut tail), Some(0.05));
+        assert!(tail.is_empty(), "a progress line must not reach the tray");
     }
 }

@@ -3,32 +3,32 @@ use std::sync::{Arc, Mutex};
 
 use nimbus_ipc::State;
 
-use crate::engine::{Command, Engine, Event};
+use crate::engine::{Engine, Event};
 
 /// The D-Bus surface of the daemon. The service reads the state and sends
-/// commands. Only the engine changes the state.
+/// requests. Only the engine changes the state.
 pub struct NimbusService {
     engine: Arc<Mutex<Engine>>,
-    commands: Sender<Event>,
+    requests: Sender<Event>,
 }
 
 impl NimbusService {
     /// Builds the service. The engine is shared with the main loop.
-    pub fn new(engine: Arc<Mutex<Engine>>, commands: Sender<Event>) -> Self {
-        Self { engine, commands }
+    pub fn new(engine: Arc<Mutex<Engine>>, requests: Sender<Event>) -> Self {
+        Self { engine, requests }
     }
 }
 
-// The attribute takes a literal, so it must stay in step with the constant in
-// nimbus-ipc. A test below fails when the two differ.
+// The attribute takes a literal, so it cannot read INTERFACE from nimbus-ipc.
+// The test below fails when the two differ.
 #[zbus::interface(name = "io.github.luckjmg.nimbus1")]
 impl NimbusService {
     fn sync_now(&self) -> zbus::fdo::Result<()> {
-        self.send(Command::SyncNow)
+        self.send(Event::SyncNow)
     }
 
     fn set_paused(&self, paused: bool) -> zbus::fdo::Result<()> {
-        self.send(Command::SetPaused(paused))
+        self.send(Event::SetPaused(paused))
     }
 
     #[zbus(property)]
@@ -42,11 +42,11 @@ impl NimbusService {
 }
 
 impl NimbusService {
-    /// The command goes on the same channel the file watcher uses, so the
+    /// The request goes on the same channel the file watcher uses, so the
     /// engine has one path for every request.
-    fn send(&self, command: Command) -> zbus::fdo::Result<()> {
-        self.commands
-            .send(Event::Command(command))
+    fn send(&self, event: Event) -> zbus::fdo::Result<()> {
+        self.requests
+            .send(event)
             .map_err(|_| zbus::fdo::Error::Disconnected(String::from("the daemon loop stopped")))
     }
 }
