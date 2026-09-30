@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "formatter": true,
+  "permissions": [
+    { "action": "shell", "resource": "sudo *", "effect": "ask" },
+    { "action": "shell", "resource": "rm -rf *", "effect": "ask" },
+    { "action": "shell", "resource": "just install*", "effect": "ask" },
+    { "action": "shell", "resource": "git push *", "effect": "ask" }
+  ]
+}
