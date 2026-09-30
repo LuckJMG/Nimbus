@@ -1,17 +1,20 @@
 //! The D-Bus contract between the Nimbus daemon and its clients.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Type, Value};
-// The macro attributes below take string literals. The constants and the
-// literals can drift apart.
+// The macro attribute below takes a string literal, so it cannot read these
+// constants. A test in this crate compares the two, and a second test in
+// `nimbusd` compares the service attribute against INTERFACE.
 pub const BUS_NAME: &str = "io.github.luckjmg.nimbus";
 pub const OBJECT_PATH: &str = "/io/github/luckjmg/nimbus";
 pub const INTERFACE: &str = "io.github.luckjmg.nimbus1";
 
 /// The phase of the sync engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
-#[serde(rename_all = "lowercase")]
+///
+/// The Serialize derive carries the signal. `emit_signal` takes a value that
+/// implements Serialize, and it is the only way to build the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type, Value, OwnedValue)]
 // This attribute is required. Without it, the derive macro sends the enum as
 // a u32 instead of a string.
 #[zvariant(signature = "s", rename_all = "lowercase")]
@@ -22,7 +25,7 @@ pub enum Phase {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Value, OwnedValue)]
+#[derive(Debug, Clone, PartialEq, Serialize, Type, Value, OwnedValue)]
 pub struct State {
     pub phase: Phase,
     /// The value is from 0.0 to 1.0, and is zero while the daemon is idle.
@@ -52,23 +55,34 @@ pub trait Nimbus {
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
 
-    // The signal is named Changed. A property named State already generates
-    // receive_state_changed. A signal named StateChanged generates the same
-    // name twice.
-    #[zbus(signal)]
-    fn changed(&self, state: State) -> zbus::Result<()>;
+    // The trait declares no signal. The daemon emits Changed on its own, and
+    // the tray reads the property on a timer, because a dropped signal looks
+    // the same as an idle daemon.
 }
 
 #[cfg(test)]
 mod tests {
+    use zbus::proxy::Defaults;
+
     use super::*;
 
-    /// The daemon and the tray both use the blocking proxy. This test stops
-    /// compiling if a zbus upgrade removes either type.
+    /// The proxy macro takes string literals, so the names above and the names
+    /// inside the attribute can drift apart. The macro keeps its own copy, and
+    /// this test compares it.
     #[test]
-    fn both_proxies_exist() {
-        fn names(_: Option<NimbusProxy<'_>>, _: Option<NimbusProxyBlocking<'_>>) {}
-        let _ = names;
+    fn the_proxy_uses_the_constants() {
+        assert_eq!(
+            NimbusProxy::INTERFACE.as_ref().map(|name| name.as_str()),
+            Some(INTERFACE)
+        );
+        assert_eq!(
+            NimbusProxy::DESTINATION.as_ref().map(|name| name.as_str()),
+            Some(BUS_NAME)
+        );
+        assert_eq!(
+            NimbusProxy::PATH.as_ref().map(|path| path.as_str()),
+            Some(OBJECT_PATH)
+        );
     }
 
     /// The daemon emits the Changed signal directly. A field reorder in State
@@ -76,23 +90,5 @@ mod tests {
     #[test]
     fn state_signature_is_stable() {
         assert_eq!(State::SIGNATURE, "(sdts)");
-    }
-
-    /// The Phase enum and the config file use the same four words.
-    #[test]
-    fn phase_names_match_serde() {
-        use serde::Deserialize;
-        use serde::de::IntoDeserializer;
-        for (text, want) in [
-            ("idle", Phase::Idle),
-            ("syncing", Phase::Syncing),
-            ("paused", Phase::Paused),
-            ("error", Phase::Error),
-        ] {
-            let deserializer: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-                text.into_deserializer();
-            let got = Phase::deserialize(deserializer).expect("valid phase");
-            assert_eq!(got, want, "for {text}");
-        }
     }
 }
