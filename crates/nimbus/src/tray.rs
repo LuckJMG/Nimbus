@@ -2,34 +2,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use nimbus_ipc::{Phase, State};
+use ksni::blocking::Handle;
+use nimbus_ipc::Phase;
+
+use crate::view::{Action, View, is_paused, is_syncing, phase, status_name, status_text};
 
 /// The icon file inside a theme directory.
 const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-sync.svg";
 const ICON: &str = "nimbus-sync";
 const FALLBACK: &str = "folder-sync";
 
-/// What a menu item asks the main loop to do. The menu callback must not block,
-/// so it only sends on a channel.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Action {
-    SyncNow,
-    /// The worker resolves the toggle against the view, so the click sites
-    /// never need to know the current state.
-    TogglePaused,
-    /// Asks the main thread to show the window. The worker owns the relay,
-    /// because it is the only place that knows which thread an action needs.
-    ShowWindow,
-}
-
-/// What the tray shows. The daemon may not run, so the state is optional.
-#[derive(Debug, Clone, PartialEq)]
-pub enum View {
-    Offline,
-    Ready(State),
-}
-
-/// The icon name, plus the theme path when the host needs one to find it.
+/// The icon name, plus the theme directory when the host needs one to find it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Icon {
     pub name: String,
@@ -38,69 +21,30 @@ pub struct Icon {
 
 impl Icon {
     pub fn resolve() -> Self {
-        pick(
-            Path::new(&source_theme_path()).join(ICON_FILE).is_file(),
-            installed_theme_path(),
-        )
+        let source = source_icon_dir();
+        if Path::new(&source).join(ICON_FILE).is_file() {
+            return pick(Some(source), None);
+        }
+        pick(None, installed_icon_dir())
     }
 }
 
-/// Picks the icon. The caller supplies both answers, so a test decides them
+/// Picks the icon. The caller supplies both candidates, so a test decides them
 /// without depending on what happens to be installed on the machine.
-pub fn pick(source: bool, installed: Option<PathBuf>) -> Icon {
-    match (source, installed) {
-        (true, _) => Icon {
-            name: String::from(ICON),
-            theme_path: source_theme_path(),
-        },
-        (false, Some(dir)) => Icon {
-            name: String::from(ICON),
-            theme_path: dir.to_string_lossy().into_owned(),
-        },
-        (false, None) => Icon {
-            name: String::from(FALLBACK),
-            theme_path: String::new(),
-        },
-    }
-}
-
-pub fn is_paused(view: &View) -> bool {
-    matches!(view, View::Ready(state) if state.phase == Phase::Paused)
-}
-
-pub fn is_syncing(view: &View) -> bool {
-    matches!(view, View::Ready(state) if state.phase == Phase::Syncing)
-}
-
-/// The full state text, for the tooltip. The tooltip has room for the error
-/// message from the daemon.
-pub fn status_text(view: &View) -> String {
-    match view {
-        View::Offline => String::from("The daemon is not running"),
-        View::Ready(state) => match state.phase {
-            Phase::Idle => String::from("Idle"),
-            Phase::Syncing => format!("Syncing, {:.0}%", state.progress * 100.0),
-            Phase::Paused => String::from("Paused"),
-            Phase::Error if state.last_error.is_empty() => String::from("The last run failed"),
-            Phase::Error => state.last_error.clone(),
-        },
-    }
-}
-
-/// The short state name, for the menu header. A menu row has no room for the
-/// error message, and the tooltip carries it.
-pub fn status_name(view: &View) -> String {
-    match view {
-        View::Offline => String::from("The daemon is not running"),
-        View::Ready(state) => match state.phase {
-            Phase::Error => String::from("Error"),
-            _ => status_text(view),
-        },
+pub fn pick(source: Option<String>, installed: Option<PathBuf>) -> Icon {
+    let (name, theme_path) = match (source, installed) {
+        (Some(dir), _) => (ICON, dir),
+        (None, Some(dir)) => (ICON, dir.to_string_lossy().into_owned()),
+        (None, None) => (FALLBACK, String::new()),
+    };
+    Icon {
+        name: String::from(name),
+        theme_path,
     }
 }
 
 /// Builds the tooltip for the panel.
-pub fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
+fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
     ksni::ToolTip {
         icon_name: String::from(icon),
         icon_pixmap: Vec::new(),
@@ -111,9 +55,9 @@ pub fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
 
 /// Returns the overlay icon. An empty name means no overlay, which is what the
 /// specification asks for.
-pub fn overlay(view: &View) -> String {
-    match view {
-        View::Ready(state) if state.phase == Phase::Error => String::from("dialog-error"),
+fn overlay(view: &View) -> String {
+    match phase(view) {
+        Some(Phase::Error) => String::from("dialog-error"),
         _ => String::new(),
     }
 }
@@ -234,10 +178,33 @@ impl ksni::Tray for NimbusTray {
     }
 }
 
+/// Moves the view into the tray and asks the host to read it again.
+///
+/// Every visible part of the tray is a `Tray` method that reads the shared
+/// view, and the host calls them only after `update`. So the view write and the
+/// update belong together, and they belong here rather than in the worker loop.
+/// Returns false when the panel dropped the item, which the window survives.
+pub fn refresh(handle: &Handle<NimbusTray>, view: &Mutex<View>, next: View) -> bool {
+    // The lock must be released before the update. The update makes the tray
+    // service read the view for the tooltip and rebuild the menu, and the
+    // service runs on another thread. Holding the lock across the call would
+    // wait for itself.
+    let changed = {
+        let mut guard = view.lock().expect("the view lock");
+        if *guard == next {
+            false
+        } else {
+            *guard = next;
+            true
+        }
+    };
+    changed && handle.update(|_: &mut NimbusTray| {}).is_none()
+}
+
 /// The icon directory in the source tree, so `cargo run -p nimbus` shows the
 /// project icon before any package installs it. The data directory sits at the
 /// root of the workspace, two levels above this crate.
-fn source_theme_path() -> String {
+fn source_icon_dir() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../data/icons")
         .to_string_lossy()
@@ -245,10 +212,11 @@ fn source_theme_path() -> String {
 }
 
 /// Finds the XDG icon directory that holds the file, where the package installs
-/// it. The function returns the directory, because a host looks an icon name up
-/// in its own cache, and the cache does not know an icon that was installed
-/// after the last rebuild. The path makes the host read the file instead.
-fn installed_theme_path() -> Option<PathBuf> {
+/// it. The function returns the directory, not the file, because a host looks
+/// an icon name up in its own cache, and the cache does not know an icon that
+/// was installed after the last rebuild. The path makes the host read the file
+/// instead.
+fn installed_icon_dir() -> Option<PathBuf> {
     let dirs = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .into_iter()
@@ -268,19 +236,15 @@ mod tests {
     use ksni::Tray;
 
     use super::*;
-
-    fn ready(phase: Phase, last_error: &str) -> View {
-        View::Ready(State {
-            phase,
-            progress: 0.43,
-            last_run: 0,
-            last_error: String::from(last_error),
-        })
-    }
+    use crate::view::fixtures::ready;
 
     fn tray(view: View) -> NimbusTray {
         let (tx, _rx) = mpsc::channel();
-        NimbusTray::new(Arc::new(Mutex::new(view)), pick(true, None), tx)
+        NimbusTray::new(
+            Arc::new(Mutex::new(view)),
+            pick(Some(source_icon_dir()), None),
+            tx,
+        )
     }
 
     fn labels(menu: &[ksni::MenuItem<NimbusTray>]) -> Vec<String> {
@@ -297,13 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn pick_uses_the_source_tree() {
-        let icon = pick(true, None);
+    fn pick_uses_the_source_directory() {
+        let icon = pick(Some(String::from("/src/data/icons")), None);
         assert_eq!(icon.name, ICON);
-        assert!(
-            icon.theme_path.contains("data/icons"),
-            "the host needs the path"
-        );
+        assert_eq!(icon.theme_path, "/src/data/icons");
     }
 
     // A host looks an icon name up in its own cache, and the cache does not
@@ -311,24 +272,24 @@ mod tests {
     // the host read the file. A live run on KDE showed a blank item without it.
     #[test]
     fn pick_sends_the_installed_directory_to_the_host() {
-        let icon = pick(false, Some(PathBuf::from("/usr/share/icons")));
+        let icon = pick(None, Some(PathBuf::from("/usr/share/icons")));
         assert_eq!(icon.name, ICON);
         assert_eq!(icon.theme_path, "/usr/share/icons");
     }
 
     #[test]
     fn pick_falls_back_when_the_file_is_absent() {
-        let icon = pick(false, None);
+        let icon = pick(None, None);
         assert_eq!(icon.name, FALLBACK);
         assert!(icon.theme_path.is_empty());
     }
 
-    // The theme path has to reach the data directory at the root of the
+    // The icon directory has to reach the data directory at the root of the
     // workspace. A wrong number of levels passes every other test here, and the
     // tray then shows the fallback icon for no visible reason.
     #[test]
-    fn the_source_theme_path_holds_the_icon_file() {
-        let path = Path::new(&source_theme_path()).join(ICON_FILE);
+    fn the_source_icon_dir_holds_the_icon_file() {
+        let path = Path::new(&source_icon_dir()).join(ICON_FILE);
         assert!(
             path.is_file(),
             "the icon file is missing at {}",
@@ -366,12 +327,6 @@ mod tests {
     fn the_error_tooltip_shows_the_daemon_text() {
         let tip = tooltip(&ready(Phase::Error, "Bisync aborted"), ICON);
         assert_eq!(tip.description, "Bisync aborted");
-    }
-
-    #[test]
-    fn the_error_tooltip_never_comes_up_empty() {
-        let tip = tooltip(&ready(Phase::Error, ""), ICON);
-        assert!(!tip.description.is_empty(), "an empty tooltip says nothing");
     }
 
     #[test]

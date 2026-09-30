@@ -1,14 +1,13 @@
 use std::sync::mpsc::Sender;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, HeaderBar, Label, Orientation, ProgressBar, Window};
 
-use crate::tray::{Action, View, is_paused, status_name};
+use crate::view::{Action, View, is_paused, status_name};
 
 /// States the last run in words. An absolute timestamp needs a date library
 /// and a time zone, and the tray has no room for it either way.
-pub fn ago(seconds: u64) -> String {
+fn ago(seconds: u64) -> String {
     let (value, unit) = match seconds {
         0..=59 => return String::from("just now"),
         60..=3599 => (seconds / 60, "minute"),
@@ -21,27 +20,29 @@ pub fn ago(seconds: u64) -> String {
 
 /// States how long ago the last run ended. A clock that moved backwards gives
 /// a difference of zero, which reads as "just now".
-pub fn ago_since(unix: u64, now: u64) -> String {
+fn ago_since(unix: u64, now: u64) -> String {
     if unix == 0 {
         return String::from("no run yet");
     }
     ago(now.saturating_sub(unix))
 }
 
-pub fn pause_label(view: &View) -> &'static str {
+fn pause_label(view: &View) -> &'static str {
     if is_paused(view) { "Resume" } else { "Pause" }
 }
 
 /// The error line, or `None` when the line must hide itself. A hidden line
 /// leaves no gap, so a run that succeeds leaves no scar.
-pub fn error_line(view: &View) -> Option<&str> {
-    match view {
-        View::Ready(state) if !state.last_error.is_empty() => Some(&state.last_error),
-        _ => None,
-    }
+fn error_line(view: &View) -> Option<&str> {
+    let View::Ready(state) = view else {
+        return None;
+    };
+    (!state.last_error.is_empty()).then_some(state.last_error.as_str())
 }
 
 pub struct App {
+    /// The timer holds a weak reference to this window, so it can outlive the
+    /// call that built it.
     pub root: Window,
     phase: Label,
     progress: ProgressBar,
@@ -51,42 +52,27 @@ pub struct App {
 }
 
 impl App {
-    pub fn present(&self) {
-        self.root.present();
-    }
-
     /// Rewrites every field. The caller checks for a change first, so this runs
     /// only when the view moved. The heading takes the short name, because the
     /// error line below it carries the message from the daemon.
     pub fn apply(&self, view: &View, now: u64) {
         self.phase.set_text(&status_name(view));
-        match view {
-            View::Ready(state) => {
-                self.progress.set_fraction(state.progress);
-                self.progress
-                    .set_text(Some(&format!("{:.0}%", state.progress * 100.0)));
-            }
-            View::Offline => {
-                self.progress.set_fraction(0.0);
-                self.progress.set_text(Some("no connection"));
-            }
-        }
-        let last_run = match view {
-            View::Ready(state) => state.last_run,
-            View::Offline => 0,
+        self.pause.set_label(pause_label(view));
+        let View::Ready(state) = view else {
+            self.progress.set_fraction(0.0);
+            self.progress.set_text(Some("no connection"));
+            self.last_run.set_text(&ago_since(0, now));
+            self.error.set_text("");
+            self.error.set_visible(false);
+            return;
         };
-        self.last_run.set_text(&ago_since(last_run, now));
+        self.progress.set_fraction(state.progress);
+        self.progress
+            .set_text(Some(&format!("{:.0}%", state.progress * 100.0)));
+        self.last_run.set_text(&ago_since(state.last_run, now));
         self.error.set_text(error_line(view).unwrap_or_default());
         self.error.set_visible(error_line(view).is_some());
-        self.pause.set_label(pause_label(view));
     }
-}
-
-pub fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or(0)
 }
 
 /// Builds the window. Every widget is a stock GTK widget, so the window
@@ -166,24 +152,15 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
 mod tests {
     use nimbus_ipc::Phase;
 
+    use crate::view::fixtures::ready;
+
     use super::*;
 
-    fn ready(phase: Phase) -> View {
-        View::Ready(nimbus_ipc::State {
-            phase,
-            progress: 0.0,
-            last_run: 0,
-            last_error: String::new(),
-        })
-    }
-
     fn failed() -> View {
-        View::Ready(nimbus_ipc::State {
-            phase: Phase::Error,
-            progress: 0.0,
-            last_run: 0,
-            last_error: String::from("Bisync aborted. Must run --resync to recover."),
-        })
+        ready(
+            Phase::Error,
+            "Bisync aborted. Must run --resync to recover.",
+        )
     }
 
     #[test]
@@ -216,21 +193,9 @@ mod tests {
 
     #[test]
     fn the_pause_button_follows_the_view() {
-        assert_eq!(pause_label(&ready(Phase::Paused)), "Resume");
-        assert_eq!(pause_label(&ready(Phase::Idle)), "Pause");
-        assert_eq!(pause_label(&ready(Phase::Syncing)), "Pause");
-    }
-
-    // The window shows the error in its own line. The heading must stay short,
-    // or the message appears twice.
-    #[test]
-    fn the_heading_never_repeats_the_error_line() {
-        let view = failed();
-        assert_eq!(status_name(&view), "Error");
-        let View::Ready(state) = &view else {
-            panic!("the test needs a ready view");
-        };
-        assert!(!status_name(&view).contains(&state.last_error));
+        assert_eq!(pause_label(&ready(Phase::Paused, "")), "Resume");
+        assert_eq!(pause_label(&ready(Phase::Idle, "")), "Pause");
+        assert_eq!(pause_label(&ready(Phase::Syncing, "")), "Pause");
     }
 
     // The line must hide itself when there is no message, or the window keeps
@@ -241,7 +206,7 @@ mod tests {
             error_line(&failed()),
             Some("Bisync aborted. Must run --resync to recover.")
         );
-        assert_eq!(error_line(&ready(Phase::Idle)), None);
+        assert_eq!(error_line(&ready(Phase::Idle, "")), None);
         assert_eq!(error_line(&View::Offline), None);
     }
 }

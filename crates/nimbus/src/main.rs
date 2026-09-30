@@ -1,4 +1,5 @@
 mod tray;
+mod view;
 mod window;
 
 use std::cell::RefCell;
@@ -15,7 +16,15 @@ use gtk::prelude::*;
 use ksni::blocking::TrayMethods;
 use nimbus_ipc::NimbusProxyBlocking;
 
-use tray::{Action, Icon, NimbusTray, View, is_paused};
+use tray::{Icon, NimbusTray};
+use view::{Action, View, is_paused};
+
+/// The seconds since the Unix epoch, which is the unit of `State::last_run`.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
 
 /// The application id. GApplication uses it to hand an activation to the
 /// process that already holds the name, which keeps one icon in the panel.
@@ -96,7 +105,7 @@ fn start() -> Result<gtk::Application> {
             // A second process handed its activation to this one, so only the
             // window has to come forward.
             if let Some(window) = ui.window.borrow().as_ref() {
-                window.present();
+                window.root.present();
             }
             return;
         }
@@ -113,7 +122,7 @@ fn start() -> Result<gtk::Application> {
             .take()
             .expect("the first activation starts the worker");
         refresh_loop(&ui, &window, start.requests);
-        window.present();
+        window.root.present();
 
         let worker = Worker {
             view: Arc::clone(&view),
@@ -172,7 +181,7 @@ fn refresh_loop(ui: &Rc<Ui>, app: &Rc<window::App>, requests: Receiver<()>) {
         }
         let current = view.lock().expect("the view lock").clone();
         if last.as_ref() != Some(&current) {
-            shown.apply(&current, window::now_unix());
+            shown.apply(&current, unix_now());
             last = Some(current);
         }
         ControlFlow::Continue
@@ -215,49 +224,42 @@ impl Worker {
             }
             batch.extend(actions.try_iter());
             for action in batch {
-                let result = match action {
-                    Action::SyncNow => proxy.sync_now(),
-                    // The worker resolves the toggle, so the click sites never
-                    // need to know the current state.
-                    Action::TogglePaused => {
-                        let next = !is_paused(&view.lock().expect("the view lock"));
-                        proxy.set_paused(next)
-                    }
-                    // The window belongs to the main thread, so the request
-                    // goes across as a message and the timer there presents it.
-                    Action::ShowWindow => {
-                        let _ = show.send(());
-                        continue;
-                    }
-                };
-                if let Err(err) = result {
-                    eprintln!("nimbus: the daemon refused the request: {err}");
-                }
+                send(action, &proxy, &view, &show);
             }
             let next = match proxy.state() {
                 Ok(state) => View::Ready(state),
                 Err(_) => View::Offline,
             };
-            // The lock must be released before the update. The update makes the
-            // tray service read the view for the tooltip and rebuild the menu,
-            // and the service runs on another thread. Holding the lock across
-            // the call would wait for itself.
-            let changed = {
-                let mut guard = view.lock().expect("the view lock");
-                if *guard == next {
-                    false
-                } else {
-                    *guard = next;
-                    true
-                }
-            };
-            // The Tray methods read the view on each call. The update only
-            // makes the host read them again.
-            if changed && handle.update(|_: &mut NimbusTray| {}).is_none() {
+            if tray::refresh(&handle, &view, next) {
                 // The panel dropped the item. The window keeps working, so the
                 // process stays up and a panel reload brings the icon back.
                 eprintln!("nimbus: the desktop closed the tray item");
             }
         }
+    }
+}
+
+/// Carries out one action. The worker resolves the pause toggle, so the click
+/// sites never need to know the current state. The window belongs to the main
+/// thread, so that request goes across as a message.
+fn send(
+    action: Action,
+    proxy: &NimbusProxyBlocking<'_>,
+    view: &Arc<Mutex<View>>,
+    show: &Sender<()>,
+) {
+    let result = match action {
+        Action::SyncNow => proxy.sync_now(),
+        Action::TogglePaused => {
+            let next = !is_paused(&view.lock().expect("the view lock"));
+            proxy.set_paused(next)
+        }
+        Action::ShowWindow => {
+            let _ = show.send(());
+            return;
+        }
+    };
+    if let Err(err) = result {
+        eprintln!("nimbus: the daemon refused the request: {err}");
     }
 }
