@@ -259,9 +259,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     };
     text(&fields.remote, &start.remote);
     text(&fields.local, &start.local);
-    fields
-        .flags
-        .set_placeholder_text(Some("--drive-skip-shortcuts"));
 
     // The daemon's copy of the keys. The Save button reads it to decide
     // whether the save needs a warning. The seed must match what the widgets
