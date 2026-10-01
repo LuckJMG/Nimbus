@@ -49,6 +49,8 @@ struct Fields {
     local: Entry,
     interval: SpinButton,
     debounce: SpinButton,
+    /// The extra rclone flags, separated by spaces.
+    flags: Entry,
 }
 
 impl Fields {
@@ -60,6 +62,12 @@ impl Fields {
             local: self.local.text().to_string(),
             interval_secs: self.interval.value().max(0.0) as u64,
             debounce_secs: self.debounce.value().max(0.0) as u64,
+            extra_flags: self
+                .flags
+                .text()
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
         }
     }
 
@@ -72,6 +80,7 @@ impl Fields {
         text(&self.local, &s.local);
         time(&self.interval, s.interval_secs);
         time(&self.debounce, s.debounce_secs);
+        text(&self.flags, &s.extra_flags.join(" "));
     }
 }
 
@@ -238,6 +247,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         local: String::from("~/Nimbus"),
         interval_secs: 900,
         debounce_secs: 30,
+        extra_flags: Vec::new(),
     };
 
     let fields = Fields {
@@ -245,9 +255,13 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         local: Entry::new(),
         interval: seconds(start.interval_secs),
         debounce: seconds(start.debounce_secs),
+        flags: Entry::new(),
     };
     text(&fields.remote, &start.remote);
     text(&fields.local, &start.local);
+    fields
+        .flags
+        .set_placeholder_text(Some("--drive-skip-shortcuts"));
 
     // The daemon's copy of the keys. The Save button reads it to decide
     // whether the save needs a warning. The seed must match what the widgets
@@ -295,6 +309,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     body.append(&row("Local folder", &fields.local));
     body.append(&row("Interval in seconds", &fields.interval));
     body.append(&row("Quiet time in seconds", &fields.debounce));
+    body.append(&row("Extra rclone flags", &fields.flags));
     body.append(&error);
     body.append(&buttons);
     root.set_child(Some(&body));
@@ -343,6 +358,7 @@ mod tests {
             local: String::from(local),
             interval_secs: 900,
             debounce_secs: 30,
+            extra_flags: Vec::new(),
         }
     }
 

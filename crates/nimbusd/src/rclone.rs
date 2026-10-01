@@ -163,7 +163,8 @@ fn command(cfg: &Config, needs_resync: bool) -> Command {
     if cfg.resync_pending || needs_resync {
         cmd.arg("--resync");
     }
-    cmd.arg(cfg.local.path())
+    cmd.args(&cfg.extra_flags)
+        .arg(cfg.local.path())
         .arg(cfg.remote_path())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -343,6 +344,23 @@ mod tests {
         let args = args_of(&cfg);
         assert_eq!(args[args.len() - 2], "/home/luck/Nimbus");
         assert_eq!(args[args.len() - 1], "gdrive:/");
+    }
+
+    #[test]
+    fn the_command_passes_the_extra_flags_before_the_paths() {
+        let cfg = Config {
+            extra_flags: vec![
+                String::from("--drive-skip-shortcuts"),
+                String::from("--drive-acknowledge-abuse"),
+            ],
+            ..Config::default()
+        };
+        let args = args_of(&cfg);
+        let n = args.len();
+        assert_eq!(
+            args[n - 4..n - 2],
+            ["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]
+        );
     }
 
     // rclone cannot open a path that starts with a tilde, so the command must

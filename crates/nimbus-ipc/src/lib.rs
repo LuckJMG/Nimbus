@@ -52,6 +52,8 @@ pub struct Settings {
     pub local: String,
     pub interval_secs: u64,
     pub debounce_secs: u64,
+    /// More rclone flags for every run, one flag or value per item.
+    pub extra_flags: Vec<String>,
 }
 
 #[proxy(
@@ -119,6 +121,6 @@ mod tests {
     /// every value into the wrong field at runtime.
     #[test]
     fn settings_signature_is_stable() {
-        assert_eq!(Settings::SIGNATURE, "(sstt)");
+        assert_eq!(Settings::SIGNATURE, "(ssttas)");
     }
 }

@@ -93,6 +93,7 @@ The Settings dialog of the tray writes the same file while the daemon runs.
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`. The flag clears only after a run that ends without an error. |
+| `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]`. |
 
 The daemon syncs the root of the remote, so the whole drive is the target. A
 build before this one read a `path` key and synced one folder inside the remote.
@@ -135,8 +136,9 @@ instead.
 | Settings | Opens the dialog for the keys in the table above. |
 | Quit | Stops the tray. The daemon keeps running. |
 
-The Settings row opens a dialog for `remote`, `local`, `interval_secs`, and
-`debounce_secs`. The daemon takes the new keys at once and writes the file.
+The Settings row opens a dialog for `remote`, `local`, `interval_secs`,
+`debounce_secs`, and `extra_flags`. The dialog takes the flags as one line,
+separated by spaces. The daemon takes the new keys at once and writes the file.
 A time above 86400 needs the file, because the dialog stops at one day.
 
 A moved `remote` or `local` has no bisync listing, so the daemon sets
@@ -167,11 +169,11 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings sstt gdrive '~/Nimbus' 900 30
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttas gdrive '~/Nimbus' 900 30 0
 ```
 
-The four values of `sstt` are `remote`, `local`, `interval_secs`, and
-`debounce_secs`. A refusal names the key, for example:
+The values of `ssttas` are `remote`, `local`, `interval_secs`,
+`debounce_secs`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the key, for example:
 
 ```console
 Call failed: the config key remote is empty. Set a remote name.

@@ -49,6 +49,10 @@ pub struct Config {
     /// The next run uses the rclone flag --resync. The flag clears only after
     /// a run that ends without an error.
     pub resync_pending: bool,
+    /// More rclone flags for every run, for example `--drive-skip-shortcuts`.
+    /// A file without the key loads an empty list.
+    #[serde(default)]
+    pub extra_flags: Vec<String>,
 }
 
 impl Default for Config {
@@ -60,6 +64,7 @@ impl Default for Config {
             interval_secs: 900,
             debounce_secs: 30,
             resync_pending: true,
+            extra_flags: Vec::new(),
         }
     }
 }
@@ -103,6 +108,7 @@ pub fn settings_of(cfg: &Config) -> Settings {
         local: cfg.local.text(),
         interval_secs: cfg.interval_secs,
         debounce_secs: cfg.debounce_secs,
+        extra_flags: cfg.extra_flags.clone(),
     }
 }
 
@@ -123,6 +129,7 @@ pub fn apply_settings(cfg: &mut Config, s: &Settings) {
     cfg.local = local;
     cfg.interval_secs = s.interval_secs;
     cfg.debounce_secs = s.debounce_secs;
+    cfg.extra_flags = s.extra_flags.clone();
 }
 
 /// A test passes a temporary directory.
@@ -282,6 +289,7 @@ mod tests {
             interval_secs: 60,
             debounce_secs: 5,
             resync_pending: false,
+            extra_flags: vec![String::from("--drive-skip-shortcuts")],
         };
         save_to(&want, &file).expect("the daemon wrote the config file");
         let got = load_from(&file).expect("the daemon read the config file");
@@ -330,6 +338,24 @@ mod tests {
             text.contains("Delete the line path"),
             "the message tells the user what to do: {text}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A file from a build before the key must still load.
+    #[test]
+    fn a_file_without_extra_flags_loads() {
+        let base = temp_base("no-extra-flags");
+        let file = path_in(&base);
+        std::fs::create_dir_all(file.parent().expect("the config has a parent"))
+            .expect("the daemon created the config dir");
+        std::fs::write(
+            &file,
+            "remote = \"gdrive\"\nlocal = \"/srv/notes\"\n\
+             paused = false\ninterval_secs = 900\ndebounce_secs = 30\nresync_pending = false\n",
+        )
+        .expect("the daemon wrote the config file");
+        let cfg = load_from(&file).expect("the daemon read the older file");
+        assert!(cfg.extra_flags.is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -401,6 +427,7 @@ mod tests {
             local: String::from("/srv/notes"),
             interval_secs: 60,
             debounce_secs: 5,
+            extra_flags: vec![String::from("--drive-skip-shortcuts")],
         }
     }
 
@@ -414,6 +441,7 @@ mod tests {
             resync_pending: false,
             interval_secs: 60,
             debounce_secs: 5,
+            extra_flags: vec![String::from("--drive-skip-shortcuts")],
         }
     }
 
@@ -432,6 +460,7 @@ mod tests {
         assert_eq!(cfg.local.text(), "/srv/notes");
         assert_eq!(cfg.interval_secs, 60);
         assert_eq!(cfg.debounce_secs, 5);
+        assert_eq!(cfg.extra_flags, ["--drive-skip-shortcuts"]);
     }
 
     #[test]
