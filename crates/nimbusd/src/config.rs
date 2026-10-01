@@ -28,11 +28,15 @@ impl LocalDir {
 }
 
 /// The daemon reads this file at start.
+///
+/// The struct refuses an unknown key. The daemon once read a folder in the
+/// remote and synced that folder alone. It now syncs the root, so a file that
+/// still carries the old key stops the daemon with a message that names it.
+/// A silent start would move a user to a different set of files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub remote: String,
-    /// The folder in the remote.
-    pub path: String,
     pub local: LocalDir,
     /// A run that is active finishes. Later runs wait for a resume.
     pub paused: bool,
@@ -51,7 +55,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             remote: String::from("gdrive"),
-            path: String::from("Nimbus"),
             local: LocalDir::new(Path::new("~/Nimbus")),
             paused: false,
             interval_secs: 900,
@@ -62,9 +65,10 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Builds the rclone target, in the form remote:path.
+    /// Builds the rclone target for the root of the remote, in the form
+    /// `remote:/`. The daemon syncs the whole remote, so no folder is named.
     pub fn remote_path(&self) -> String {
-        format!("{}:{}", self.remote, self.path)
+        format!("{}:/", self.remote)
     }
 
     /// Rejects settings that the daemon cannot use. The function returns the
@@ -73,10 +77,6 @@ impl Config {
         ensure!(
             !self.remote.is_empty(),
             "the config key remote is empty. Set a remote name."
-        );
-        ensure!(
-            !self.path.is_empty(),
-            "the config key path is empty. Set a folder name."
         );
         ensure!(
             self.interval_secs > 0,
@@ -100,7 +100,6 @@ impl Config {
 pub fn settings_of(cfg: &Config) -> Settings {
     Settings {
         remote: cfg.remote.clone(),
-        path: cfg.path.clone(),
         local: cfg.local.text(),
         interval_secs: cfg.interval_secs,
         debounce_secs: cfg.debounce_secs,
@@ -111,17 +110,16 @@ pub fn settings_of(cfg: &Config) -> Settings {
 ///
 /// The pause and the resync flag stay, because the daemon needs both for its
 /// own bookkeeping. rclone names its listing after the pair of paths, so a
-/// moved path has no listing and the flag must go up. The comparison uses the
-/// folder that rclone opens, because a text change that keeps the folder must
-/// not cost a resync.
+/// moved remote or folder has no listing and the flag must go up. The
+/// comparison uses the folder that rclone opens, because a text change that
+/// keeps the folder must not cost a resync.
 pub fn apply_settings(cfg: &mut Config, s: &Settings) {
     let local = LocalDir::new(Path::new(&s.local));
-    let moved = cfg.remote != s.remote || cfg.path != s.path || cfg.local.path() != local.path();
+    let moved = cfg.remote != s.remote || cfg.local.path() != local.path();
     if moved {
         cfg.resync_pending = true;
     }
     cfg.remote = s.remote.clone();
-    cfg.path = s.path.clone();
     cfg.local = local;
     cfg.interval_secs = s.interval_secs;
     cfg.debounce_secs = s.debounce_secs;
@@ -161,7 +159,29 @@ fn load_from(file: &Path) -> Result<Config> {
     }
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("the daemon cannot read {}", file.display()))?;
-    toml::from_str(&text).with_context(|| format!("the daemon cannot parse {}", file.display()))
+    match toml::from_str::<Config>(&text) {
+        Ok(cfg) => Ok(cfg),
+        // A config from an older build carries a key that this build removed,
+        // and the default error text only says that a field is missing. The
+        // user cannot act on that, so the text names what to do.
+        Err(err) => Err(match removed_key(&text) {
+            Some(key) => anyhow::anyhow!(
+                "the config key {key} was removed. The daemon syncs the whole remote now. Delete the line {key} from {}, then start the daemon again",
+                file.display()
+            ),
+            None => anyhow::anyhow!("the daemon cannot parse {}: {err}", file.display()),
+        }),
+    }
+}
+
+/// Returns the first key in the text that the config struct no longer holds.
+///
+/// The list is a literal, because the struct is the only source of truth and a
+/// second list would drift from it.
+fn removed_key(text: &str) -> Option<&'static str> {
+    ["path"]
+        .into_iter()
+        .find(|key| text.lines().any(|line| line.starts_with(key)))
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
@@ -257,7 +277,6 @@ mod tests {
         let file = path_in(&base);
         let want = Config {
             remote: String::from("my-drive"),
-            path: String::from("Notes/Daily"),
             local: LocalDir::new(Path::new("/srv/notes")),
             paused: true,
             interval_secs: 60,
@@ -281,9 +300,45 @@ mod tests {
     }
 
     #[test]
-    fn a_new_config_reports_the_remote_path() {
+    fn a_new_config_targets_the_root_of_the_remote() {
         let cfg = Config::default();
-        assert_eq!(cfg.remote_path(), "gdrive:Nimbus");
+        assert_eq!(cfg.remote_path(), "gdrive:/");
+    }
+
+    // A removed key must stop the daemon with words the user can act on. A
+    // silent start would sync the whole remote, so a user who wanted one
+    // folder would find out only after the first run.
+    #[test]
+    fn a_removed_key_names_itself() {
+        let base = temp_base("removed");
+        let file = path_in(&base);
+        std::fs::create_dir_all(file.parent().expect("the config has a parent"))
+            .expect("the daemon created the config dir");
+        std::fs::write(
+            &file,
+            "remote = \"gdrive\"\npath = \"Nimbus\"\nlocal = \"/srv/notes\"\n\
+             paused = false\ninterval_secs = 900\ndebounce_secs = 30\nresync_pending = false\n",
+        )
+        .expect("the daemon wrote the config file");
+        let err = load_from(&file).expect_err("the daemon must refuse the old key");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("path") && text.contains("removed"),
+            "the message names the key and what happened: {text}"
+        );
+        assert!(
+            text.contains("Delete the line path"),
+            "the message tells the user what to do: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A key that the struct still holds must not be reported as removed.
+    #[test]
+    fn a_current_config_is_not_reported_as_removed() {
+        let cfg = Config::default();
+        let text = toml::to_string_pretty(&cfg).expect("the daemon formatted the config");
+        assert_eq!(removed_key(&text), None);
     }
 
     #[test]
@@ -343,7 +398,6 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             remote: String::from("my-drive"),
-            path: String::from("Notes"),
             local: String::from("/srv/notes"),
             interval_secs: 60,
             debounce_secs: 5,
@@ -355,7 +409,6 @@ mod tests {
     fn settled() -> Config {
         Config {
             remote: String::from("my-drive"),
-            path: String::from("Notes"),
             local: LocalDir::new(Path::new("/srv/notes")),
             paused: true,
             resync_pending: false,
@@ -376,7 +429,6 @@ mod tests {
             "the same paths keep the listing, so no resync"
         );
         assert_eq!(cfg.remote, "my-drive");
-        assert_eq!(cfg.path, "Notes");
         assert_eq!(cfg.local.text(), "/srv/notes");
         assert_eq!(cfg.interval_secs, 60);
         assert_eq!(cfg.debounce_secs, 5);
@@ -391,17 +443,13 @@ mod tests {
         assert!(cfg.paused, "the pause survived the round trip");
     }
 
-    // rclone names its listing after the pair of paths, so a moved path has no
-    // listing. Without the flag every later run is refused.
+    // rclone names its listing after the pair of paths, so a moved remote or
+    // folder has no listing. Without the flag every later run is refused.
     #[test]
-    fn a_moved_path_asks_for_a_resync() {
+    fn a_moved_side_asks_for_a_resync() {
         for moved in [
             Settings {
                 remote: String::from("other-drive"),
-                ..settings()
-            },
-            Settings {
-                path: String::from("Other"),
                 ..settings()
             },
             Settings {

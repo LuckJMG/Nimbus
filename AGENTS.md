@@ -31,7 +31,7 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 113 tests pass today: 3 in `nimbus-ipc`, 72 in the `nimbusd`
+runs the same three. 115 tests pass today: 3 in `nimbus-ipc`, 74 in the `nimbusd`
 library, 5 in the `nimbusd` binary, and 33 in `nimbus`.
 
 ```console
@@ -61,7 +61,7 @@ An `alias` remote with an absolute path is the only test remote that works. It
 resolves the same way from any working directory.
 
 ```console
-mkdir -p /tmp/scratch/cfg/nimbus /tmp/scratch/local /tmp/scratch/remote/Nimbus
+mkdir -p /tmp/scratch/cfg/nimbus /tmp/scratch/local /tmp/scratch/remote
 cat > /tmp/scratch/cfg/rclone.conf <<'CONF'
 [drive]
 type = alias
@@ -69,8 +69,9 @@ remote = /tmp/scratch/remote
 CONF
 ```
 
-The destination folder must exist before the first run. Google Drive creates
-folders, so this affects test remotes only.
+The daemon targets the root of the remote, so the remote dir itself is the
+destination and it must exist before the first run. Google Drive needs no
+folder created, so this affects test remotes only.
 
 The first start writes a config with the defaults, then refuses to run, because
 `~/Nimbus` does not exist. That refusal is the signal to edit the scratch config.
@@ -245,23 +246,26 @@ dialog talks to the daemon over D-Bus instead of touching the file.
 
 Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 
-- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries five
+- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries four
   primitive keys. `Config` also holds `paused` and `resync_pending`, and a client
   that wrote either one would clear a flag that keeps rclone running.
 - `LocalDir` keeps a tilde for the file and drops it for rclone. The wire field
   is a plain `String`, so `LocalDir::path()` and `LocalDir::text()` are both
   needed, and the tilde must survive a save through the dialog.
-- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssstt)`, and
+- `u64` is `t` on the wire, not `u`. The pinned signature is `(sstt)`, and
   `settings_signature_is_stable` holds it.
+- `Config` carries `deny_unknown_fields`, so a file from a build that read a
+  `path` key stops the daemon with the line to delete. Serde ignores an unknown
+  key by default, and a silent start would sync the whole remote to a user who
+  asked for one folder. `removed_key` is the literal that names the old key.
 - `Adjustment::new` takes six arguments in GTK 4, with `page_size` last. The
   spin button carries the range, so the dialog cannot send a value the daemon
   refuses.
 
-A moved `remote`, `path`, or `local` has no bisync listing, because rclone names
-its listing after the pair of paths. So `apply_settings` raises
-`resync_pending`, which costs one full pass. The comparison is on the folder
-that rclone opens, because a text change that keeps the folder must not cost a
-resync.
+A moved `remote` or `local` has no bisync listing, because rclone names its
+listing after the pair of paths. So `apply_settings` raises `resync_pending`,
+which costs one full pass. The comparison is on the folder that rclone opens,
+because a text change that keeps the folder must not cost a resync.
 
 A refusal arrives as a `zbus::Error::MethodError`, and its `detail` holds the
 words from `check()`. Every other error is the bus or the daemon process, and a
@@ -280,7 +284,7 @@ The daemon side needs no click, so read it over the bus first:
 
 ```console
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssstt" "" Nimbus /tmp/scratch/local 60 3
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "sstt" "" /tmp/scratch/local 60 3
 ```
 
 The second call must fail with "the config key remote is empty", and the config
@@ -290,7 +294,7 @@ Then move the folder and read the log. A save that leaves `local` alone must
 produce no new line, and a save that moves it must name the new folder:
 
 ```console
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssstt" drive Nimbus /tmp/scratch/local2 60 3
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "sstt" drive /tmp/scratch/local2 60 3
 ```
 
 After that line, a file change in `/tmp/scratch/local2` must start a run, and a

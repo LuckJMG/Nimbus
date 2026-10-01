@@ -87,13 +87,18 @@ The Settings dialog of the tray writes the same file while the daemon runs.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remote` | `gdrive` | The rclone remote name. The name comes from your rclone config. |
-| `path` | `Nimbus` | The folder inside the remote. Google Drive creates it. |
+| `remote` | `gdrive` | The rclone remote name. The name comes from your rclone config. The daemon syncs the root of it, written `gdrive:/`. |
 | `local` | `~/Nimbus` | The local folder. The daemon watches this folder. |
 | `paused` | `false` | A run that is active finishes. Later runs wait for a resume. |
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`. The flag clears only after a run that ends without an error. |
+
+The daemon syncs the root of the remote, so the whole drive is the target. A
+build before this one read a `path` key and synced one folder inside the remote.
+The daemon now refuses a config file that still carries `path` and prints the
+line to delete, so an upgrade never moves to a different set of files by
+accident.
 
 The daemon also keeps its record of your files in `bisync/`, beside the config file.
 Do not delete that directory while the daemon runs. A lost connection leaves the
@@ -130,11 +135,11 @@ instead.
 | Settings | Opens the dialog for the keys in the table above. |
 | Quit | Stops the tray. The daemon keeps running. |
 
-The Settings row opens a dialog for `remote`, `path`, `local`, `interval_secs`,
-and `debounce_secs`. The daemon takes the new keys at once and writes the file.
+The Settings row opens a dialog for `remote`, `local`, `interval_secs`, and
+`debounce_secs`. The daemon takes the new keys at once and writes the file.
 A time above 86400 needs the file, because the dialog stops at one day.
 
-A moved `remote`, `path`, or `local` has no bisync listing, so the daemon sets
+A moved `remote` or `local` has no bisync listing, so the daemon sets
 `resync_pending` and the next run carries `--resync`. One full pass over both
 sides follows.
 
@@ -148,7 +153,7 @@ Any client can read the state and send the same commands.
 | Object path | `/io/github/luckjmg/nimbus` |
 | Interface | `io.github.luckjmg.nimbus1` |
 | Property | `State`, signature `(sdts)` |
-| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssstt)` |
+| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(sstt)` |
 | Signal | `Changed(State)` |
 
 The four values of the signature are the phase as a string, the progress as a
@@ -162,10 +167,10 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssstt gdrive Nimbus '~/Nimbus' 900 30
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings sstt gdrive '~/Nimbus' 900 30
 ```
 
-The five values of `ssstt` are `remote`, `path`, `local`, `interval_secs`, and
+The four values of `sstt` are `remote`, `local`, `interval_secs`, and
 `debounce_secs`. A refusal names the key, for example:
 
 ```console

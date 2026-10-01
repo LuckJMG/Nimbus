@@ -337,13 +337,12 @@ mod tests {
     fn the_command_names_the_local_folder_and_the_remote() {
         let cfg = Config {
             remote: String::from("gdrive"),
-            path: String::from("Nimbus"),
             local: LocalDir::new(Path::new("/home/luck/Nimbus")),
             ..Config::default()
         };
         let args = args_of(&cfg);
         assert_eq!(args[args.len() - 2], "/home/luck/Nimbus");
-        assert_eq!(args[args.len() - 1], "gdrive:Nimbus");
+        assert_eq!(args[args.len() - 1], "gdrive:/");
     }
 
     // rclone cannot open a path that starts with a tilde, so the command must

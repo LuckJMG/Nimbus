@@ -71,9 +71,9 @@ sandbox-guard:
 # Run the debug binaries against a local folder that stands in for the remote.
 sandbox: sandbox-guard
     rm -rf {{sandbox}}
-    mkdir -p {{sandbox}}/cfg/nimbus {{sandbox}}/local {{sandbox}}/remote/Nimbus
+    mkdir -p {{sandbox}}/cfg/nimbus {{sandbox}}/local {{sandbox}}/remote
     printf '[drive]\ntype = alias\nremote = %s/remote\n' {{sandbox}} > {{sandbox}}/cfg/rclone.conf
-    printf 'remote = "drive"\npath = "Nimbus"\nlocal = "%s/local"\npaused = false\ninterval_secs = 60\ndebounce_secs = 3\nresync_pending = true\n' {{sandbox}} > {{sandbox}}/cfg/nimbus/config.toml
+    printf 'remote = "drive"\nlocal = "%s/local"\npaused = false\ninterval_secs = 60\ndebounce_secs = 3\nresync_pending = true\n' {{sandbox}} > {{sandbox}}/cfg/nimbus/config.toml
     # rclone writes an empty listing when both sides hold no file, and then it
     # refuses to sync from it. One file makes the first listing usable.
     echo seed > {{sandbox}}/local/seed.txt

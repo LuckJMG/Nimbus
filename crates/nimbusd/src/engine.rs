@@ -395,7 +395,6 @@ mod tests {
         e.on_event(
             Event::SetSettings(Settings {
                 remote: String::from("my-drive"),
-                path: String::from("Notes"),
                 local: String::from("/srv/nimbus"),
                 interval_secs: 60,
                 debounce_secs: 5,
@@ -420,7 +419,6 @@ mod tests {
         e.on_event(
             Event::SetSettings(Settings {
                 remote: String::from("gdrive"),
-                path: String::from("Nimbus"),
                 local: String::from("/srv/nimbus"),
                 interval_secs: 900,
                 debounce_secs: 30,
@@ -445,7 +443,6 @@ mod tests {
         e.on_event(
             Event::SetSettings(Settings {
                 remote: String::from("gdrive"),
-                path: String::from("Nimbus"),
                 local: String::from("/srv/nimbus"),
                 interval_secs: 60,
                 debounce_secs: 30,

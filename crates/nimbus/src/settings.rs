@@ -42,7 +42,6 @@ fn seconds(value: u64) -> SpinButton {
 #[derive(Clone)]
 struct Fields {
     remote: Entry,
-    path: Entry,
     local: Entry,
     interval: SpinButton,
     debounce: SpinButton,
@@ -54,7 +53,6 @@ impl Fields {
     fn read(&self) -> Settings {
         Settings {
             remote: self.remote.text().to_string(),
-            path: self.path.text().to_string(),
             local: self.local.text().to_string(),
             interval_secs: self.interval.value().max(0.0) as u64,
             debounce_secs: self.debounce.value().max(0.0) as u64,
@@ -67,7 +65,6 @@ impl Fields {
     /// must not clear another that the user never opened.
     fn write(&self, s: &Settings) {
         text(&self.remote, &s.remote);
-        text(&self.path, &s.path);
         text(&self.local, &s.local);
         time(&self.interval, s.interval_secs);
         time(&self.debounce, s.debounce_secs);
@@ -126,8 +123,11 @@ impl App {
 /// theme of the desktop. The window sets no title bar, for the same reason as
 /// the status window.
 ///
-/// The pause and the resync flag have no field. The pause is on the menu and
-/// the status window, and two controls for one flag would disagree.
+/// The dialog holds no folder in the remote. The daemon syncs the root of the
+/// remote, so there is nothing to choose.
+///
+/// The pause and the resync flag have no field either. The pause is on the menu
+/// and the status window, and two controls for one flag would disagree.
 pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     let root = Window::builder()
         .application(app)
@@ -140,7 +140,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
 
     let fields = Fields {
         remote: Entry::new(),
-        path: Entry::new(),
         local: Entry::new(),
         interval: seconds(900),
         debounce: seconds(30),
@@ -173,7 +172,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     body.set_margin_start(12);
     body.set_margin_end(12);
     body.append(&row("Remote", &fields.remote));
-    body.append(&row("Folder in the remote", &fields.path));
     body.append(&row("Local folder", &fields.local));
     body.append(&row("Interval in seconds", &fields.interval));
     body.append(&row("Quiet time in seconds", &fields.debounce));

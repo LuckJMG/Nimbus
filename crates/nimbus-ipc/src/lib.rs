@@ -43,10 +43,12 @@ pub struct State {
 /// flag stay in `nimbusd`, because the daemon needs both for its own
 /// bookkeeping. The local folder is a plain string here, because the wire
 /// carries the text of the file and lets the daemon expand the home mark.
+///
+/// The struct holds no folder in the remote. The daemon syncs the root of the
+/// remote, so there is nothing for a client to choose.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct Settings {
     pub remote: String,
-    pub path: String,
     pub local: String,
     pub interval_secs: u64,
     pub debounce_secs: u64,
@@ -117,6 +119,6 @@ mod tests {
     /// every value into the wrong field at runtime.
     #[test]
     fn settings_signature_is_stable() {
-        assert_eq!(Settings::SIGNATURE, "(ssstt)");
+        assert_eq!(Settings::SIGNATURE, "(sstt)");
     }
 }
