@@ -44,8 +44,12 @@ const TICK: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> ExitCode {
-    match start() {
-        Ok(app) => app.run(),
+    // The autostart entry passes --hidden, so a login starts the tray and no
+    // window. GApplication refuses an option that it does not know, so the tray
+    // reads the flag here and passes no arguments on.
+    let hidden = std::env::args().skip(1).any(|arg| arg == "--hidden");
+    match start(hidden) {
+        Ok(app) => app.run_with_args::<&str>(&[]),
         Err(err) => {
             eprintln!("nimbus: {err:#}");
             ExitCode::FAILURE
@@ -56,7 +60,7 @@ fn main() -> ExitCode {
 /// GTK needs the main thread, and the zbus blocking calls must not run inside
 /// a main loop. So the window lives on the main thread and the tray runs on a
 /// worker thread of its own.
-fn start() -> Result<gtk::Application> {
+fn start(hidden: bool) -> Result<gtk::Application> {
     let conn = zbus::blocking::connection::Builder::session()
         .context("the tray cannot reach the session bus")?
         .method_timeout(TIMEOUT)
@@ -128,7 +132,11 @@ fn start() -> Result<gtk::Application> {
             .take()
             .expect("the first activation starts the worker");
         refresh_loop(&ui, &window, &dialog, start.requests);
-        window.root.present();
+        // A later activation comes from a second process, for example a start
+        // from the app menu, so it presents the window whatever this flag says.
+        if !hidden {
+            window.root.present();
+        }
 
         let worker = Worker {
             view: Arc::clone(&view),

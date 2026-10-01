@@ -65,7 +65,8 @@ The two programs start in two different ways. The daemon runs as a systemd user
 unit, because it needs no display and because a restart policy matters. The tray
 starts from the autostart entry, because the login session owns `WAYLAND_DISPLAY`
 and a systemd user unit does not. The autostart entry takes effect at the next
-login. `just run-tray` starts the tray now instead, and it finds the installed
+login. The entry passes `--hidden`, so a login starts the tray icon and no
+window. A start from the app menu opens the window. `just run-tray` starts the tray now instead, and it finds the installed
 binary after either install.
 
 ## Configure

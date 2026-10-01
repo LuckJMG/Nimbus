@@ -11,6 +11,6 @@ Keywords=drive;sync;backup;rclone;
 # The tray stays up after the window closes, so the shell gets no window to
 # wait for. A false value also leaves no spinning pointer when the start fails.
 StartupNotify=false
-# This key counts only in ~/.config/autostart, so copy the file there to start
-# the tray at login.
+# This key counts only in ~/.config/autostart. The install recipes copy the
+# file there and add --hidden to Exec, so a login opens no window.
 X-GNOME-Autostart-enabled=true

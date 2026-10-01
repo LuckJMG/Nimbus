@@ -32,7 +32,9 @@ install: build
     sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{prefix}}/share/applications/io.github.luckjmg.Nimbus.desktop
     sudo install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
-    install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
+    # The login starts the tray with --hidden, so no window opens.
+    sed 's|^Exec=.*|& --hidden|' data/applications/io.github.luckjmg.Nimbus.desktop \
+        | install -Dm644 /dev/stdin {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     systemctl --user daemon-reload
     systemctl --user enable --now nimbusd.service
     @echo "The tray starts at the next login, or now with: just run-tray"
@@ -49,7 +51,9 @@ install-user: build
         > {{home}}/.local/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sed "s|/usr/bin/nimbus|{{home}}/.local/bin/nimbus|" data/applications/io.github.luckjmg.Nimbus.desktop \
         > {{home}}/.local/share/applications/io.github.luckjmg.Nimbus.desktop
-    install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
+    # The login starts the tray with --hidden, so no window opens.
+    sed "s|^Exec=/usr/bin/nimbus|Exec={{home}}/.local/bin/nimbus --hidden|" data/applications/io.github.luckjmg.Nimbus.desktop \
+        | install -Dm644 /dev/stdin {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     install -Dm644 data/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-sync-symbolic.svg
     systemctl --user daemon-reload
     systemctl --user enable --now nimbusd.service
