@@ -241,6 +241,12 @@ need a live run, and `AGENTS.md` holds the procedure together with the traps
 that a live run found. That file also holds the crash test for the listing repair,
 which no unit test can cover.
 
+`just sandbox` builds both binaries and runs them against a local folder that
+stands in for the remote, so a run never reaches Google Drive. The recipe stops
+while a daemon already holds the bus name, because one daemon owns
+`io.github.luckjmg.nimbus` in a session. `just sandbox-stop` ends the daemon
+that the recipe started.
+
 | Crate | Role |
 | --- | --- |
 | `nimbus-ipc` | The D-Bus contract. Names, `State`, `Phase`, one proxy trait. No logic. |

@@ -6,6 +6,10 @@ set shell := ["bash", "-uc"]
 prefix := "/usr"
 home := env_var("HOME")
 
+# The scratch tree for a sandbox run. No value in ~/.config or ~/.cache moves
+# here, because the recipe sets XDG_CONFIG_HOME and RCLONE_CONFIG.
+sandbox := "/tmp/scratch"
+
 # List the recipes.
 default:
     @just --list
@@ -55,6 +59,42 @@ install-user: build
 # Start the tray now, without waiting for a login.
 run-tray:
     if [ -x "{{home}}/.local/bin/nimbus" ]; then exec "{{home}}/.local/bin/nimbus"; else exec "{{prefix}}/bin/nimbus"; fi
+
+# Refuse to start while a daemon already holds the bus name.
+sandbox-guard:
+    @if pgrep -x nimbusd >/dev/null; then \
+        echo "A daemon is already running. Stop it first:"; \
+        echo "  systemctl --user stop nimbusd.service"; \
+        exit 1; \
+    fi
+
+# Run the debug binaries against a local folder that stands in for the remote.
+sandbox: sandbox-guard
+    rm -rf {{sandbox}}
+    mkdir -p {{sandbox}}/cfg/nimbus {{sandbox}}/local {{sandbox}}/remote/Nimbus
+    printf '[drive]\ntype = alias\nremote = %s/remote\n' {{sandbox}} > {{sandbox}}/cfg/rclone.conf
+    printf 'remote = "drive"\npath = "Nimbus"\nlocal = "%s/local"\npaused = false\ninterval_secs = 60\ndebounce_secs = 3\nresync_pending = true\n' {{sandbox}} > {{sandbox}}/cfg/nimbus/config.toml
+    # rclone writes an empty listing when both sides hold no file, and then it
+    # refuses to sync from it. One file makes the first listing usable.
+    echo seed > {{sandbox}}/local/seed.txt
+    cargo build --workspace
+    # One line, because just gives each line a shell of its own and `$!` names
+    # a job of the shell that started it.
+    XDG_CONFIG_HOME={{sandbox}}/cfg RCLONE_CONFIG={{sandbox}}/cfg/rclone.conf ./target/debug/nimbusd > {{sandbox}}/nimbusd.log 2>&1 & echo $! > {{sandbox}}/nimbusd.pid
+    @echo "The daemon log is {{sandbox}}/nimbusd.log"
+    @echo "Stop the daemon with: just sandbox-stop"
+    @echo "  busctl --user get-property io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 State"
+    @echo "  busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SyncNow"
+    @echo "  dbus-monitor --session \"type='signal',interface='io.github.luckjmg.nimbus1'\""
+    exec ./target/debug/nimbus
+
+# End the daemon that the sandbox recipe started.
+sandbox-stop:
+    @if [ -f {{sandbox}}/nimbusd.pid ]; then \
+        kill "$(cat {{sandbox}}/nimbusd.pid)" && rm -f {{sandbox}}/nimbusd.pid; \
+    else \
+        echo "No pid file at {{sandbox}}/nimbusd.pid"; \
+    fi
 
 # Remove the files that install-user added. Needs no root.
 uninstall-user:

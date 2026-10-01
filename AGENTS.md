@@ -134,6 +134,12 @@ the **process** working directory, and the destination folder must already exist
 Otherwise every run fails with "directory not found" and the state stays `error`.
 Google Drive creates folders, so this affects test remotes only.
 
+Put one file in the local folder before the first run. A resync of two empty
+folders leaves an empty listing, and rclone then answers the next run with
+"Empty prior Path1 listing. Cannot sync to an empty directory." The run after
+that one resyncs and reaches `idle`, so a sandbox that starts empty looks broken
+for two intervals. `just sandbox` writes the seed file.
+
 ## The crash test
 
 The repair cannot be proven by a unit test, because the failure is rclone's on-disk
