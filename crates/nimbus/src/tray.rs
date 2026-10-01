@@ -6,6 +6,7 @@ use ksni::blocking::Handle;
 use nimbus_ipc::Phase;
 
 use crate::view::{Action, View, is_paused, is_syncing, phase, status_name, status_text};
+use crate::window::{PAUSE_ICON, SYNC_ICON};
 
 /// The icon file inside a theme directory. The `-symbolic` name suffix is not
 /// decoration. GTK reads it to recolor the icon with the foreground of the
@@ -141,6 +142,7 @@ impl ksni::Tray for NimbusTray {
             MenuItem::Separator,
             MenuItem::Standard(StandardItem {
                 label: String::from("Sync now"),
+                icon_name: String::from(SYNC_ICON),
                 // The engine drops a request while a run is active, so a
                 // click on an enabled item would look broken.
                 enabled: !is_syncing(&view),
@@ -150,7 +152,10 @@ impl ksni::Tray for NimbusTray {
                 ..Default::default()
             }),
             MenuItem::Checkmark(CheckmarkItem {
+                // The row always reads Pause and shows a tick, so the icon
+                // names the setting. Only the window button names the action.
                 label: String::from("Pause"),
+                icon_name: String::from(PAUSE_ICON),
                 // The view is the only record of the pause state. A cached
                 // flag would show a tick the daemon never confirmed.
                 checked: is_paused(&view),
@@ -162,6 +167,7 @@ impl ksni::Tray for NimbusTray {
             MenuItem::Separator,
             MenuItem::Standard(StandardItem {
                 label: String::from("Settings"),
+                icon_name: String::from("preferences-system-symbolic"),
                 activate: {
                     let settings_actions = self.actions.clone();
                     Box::new(move |_| {

@@ -1,9 +1,16 @@
 use std::sync::mpsc::Sender;
 
 use gtk::prelude::*;
-use gtk::{Align, Box as GtkBox, Button, HeaderBar, Label, Orientation, ProgressBar, Window};
+use gtk::{Align, Box as GtkBox, Button, Image, Label, Orientation, ProgressBar, Window};
 
 use crate::view::{Action, View, is_paused, status_name};
+
+/// The icon names. GTK resolves them from the icon theme of the desktop for
+/// the window, and the desktop resolves the same names for the menu. All three
+/// names exist in Breeze and in Adwaita.
+pub const SYNC_ICON: &str = "view-refresh-symbolic";
+pub const PAUSE_ICON: &str = "media-playback-pause-symbolic";
+pub const RESUME_ICON: &str = "media-playback-start-symbolic";
 
 /// States the last run in words. An absolute timestamp needs a date library
 /// and a time zone, and the tray has no room for it either way.
@@ -31,6 +38,32 @@ fn pause_label(view: &View) -> &'static str {
     if is_paused(view) { "Resume" } else { "Pause" }
 }
 
+/// The icon that follows the same switch as the label, so a paused window
+/// offers a play icon next to the word Resume.
+pub fn pause_icon(view: &View) -> &'static str {
+    if is_paused(view) {
+        RESUME_ICON
+    } else {
+        PAUSE_ICON
+    }
+}
+
+/// Builds a button with an icon in front of its text. The button takes a box
+/// with the two parts, because the child of a button is its text. The caller
+/// keeps the icon and the text, because the pause button rewrites both when the
+/// view moves.
+fn action_button(name: &str, text: &str) -> (Button, Image, Label) {
+    let icon = Image::from_icon_name(name);
+    icon.set_pixel_size(16);
+    let label = Label::new(Some(text));
+    let content = GtkBox::new(Orientation::Horizontal, 6);
+    content.append(&icon);
+    content.append(&label);
+    let button = Button::new();
+    button.set_child(Some(&content));
+    (button, icon, label)
+}
+
 /// The error line, or `None` when the line must hide itself. A hidden line
 /// leaves no gap, so a run that succeeds leaves no scar.
 fn error_line(view: &View) -> Option<&str> {
@@ -48,7 +81,8 @@ pub struct App {
     progress: ProgressBar,
     last_run: Label,
     error: Label,
-    pause: Button,
+    pause_icon: Image,
+    pause_text: Label,
 }
 
 impl App {
@@ -57,7 +91,8 @@ impl App {
     /// error line below it carries the message from the daemon.
     pub fn apply(&self, view: &View, now: u64) {
         self.phase.set_text(&status_name(view));
-        self.pause.set_label(pause_label(view));
+        self.pause_text.set_text(pause_label(view));
+        self.pause_icon.set_icon_name(Some(pause_icon(view)));
         let View::Ready(state) = view else {
             self.progress.set_fraction(0.0);
             self.progress.set_text(Some("no connection"));
@@ -76,7 +111,8 @@ impl App {
 }
 
 /// Builds the window. Every widget is a stock GTK widget, so the window
-/// follows the theme of the desktop.
+/// follows the theme of the desktop. The window sets no title bar, so the
+/// caption comes from the desktop and takes no room from the body.
 pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     let root = Window::builder()
         .application(app)
@@ -86,12 +122,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     // Closing the window hides it. The tray keeps running, and a left click
     // brings the window back.
     root.set_hide_on_close(true);
-
-    let header = HeaderBar::new();
-    let heading = Label::new(Some("Nimbus"));
-    heading.add_css_class("title");
-    header.set_title_widget(Some(&heading));
-    root.set_titlebar(Some(&header));
 
     let phase = Label::new(None);
     phase.set_xalign(0.0);
@@ -109,13 +139,13 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     error.set_wrap(true);
     error.set_visible(false);
 
-    let sync = Button::with_label("Sync now");
+    let (sync, _, _) = action_button(SYNC_ICON, "Sync now");
     let sync_actions = actions.clone();
     sync.connect_clicked(move |_| {
         let _ = sync_actions.send(Action::SyncNow);
     });
 
-    let pause = Button::with_label("Pause");
+    let (pause, pause_icon, pause_text) = action_button(PAUSE_ICON, "Pause");
     let pause_actions = actions;
     pause.connect_clicked(move |_| {
         let _ = pause_actions.send(Action::TogglePaused);
@@ -144,7 +174,8 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         progress,
         last_run,
         error,
-        pause,
+        pause_icon,
+        pause_text,
     }
 }
 
@@ -196,6 +227,16 @@ mod tests {
         assert_eq!(pause_label(&ready(Phase::Paused, "")), "Resume");
         assert_eq!(pause_label(&ready(Phase::Idle, "")), "Pause");
         assert_eq!(pause_label(&ready(Phase::Syncing, "")), "Pause");
+    }
+
+    // The label says Resume while paused, so the icon has to be a play icon.
+    // A play icon next to the word Pause asks the user to pause twice.
+    #[test]
+    fn the_pause_icon_follows_the_view() {
+        assert_eq!(pause_icon(&ready(Phase::Idle, "")), PAUSE_ICON);
+        assert_eq!(pause_icon(&ready(Phase::Syncing, "")), PAUSE_ICON);
+        assert_eq!(pause_icon(&ready(Phase::Paused, "")), RESUME_ICON);
+        assert_eq!(pause_icon(&View::Offline), PAUSE_ICON);
     }
 
     // The line must hide itself when there is no message, or the window keeps

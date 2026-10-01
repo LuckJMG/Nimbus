@@ -252,6 +252,21 @@ Six traps, all hit and all fixed. Read these before touching `main.rs`.
 - An `activate` callback runs on a thread of the tray service. It must not block. It only sends on a channel.
 - `glib::MainContext::channel` does not exist in glib 0.22. The window is woken by one `glib::timeout_add_local` timer, which also refreshes the labels.
 - `glib::WeakRef::new()` takes no argument in glib 0.22, so the binding needs a type annotation. It returns an **empty** reference, and `upgrade` returns `None` until `set` names an object. A tray click reached the window through this reference, so every click after the first did nothing. The comments on `refresh_loop` and on `App::root` described the intent, and the code did not follow.
+- `gtk_button_get_child` returns the label, not an internal box, on GTK 4.22. The recipe that prepends an icon into the child box adds nothing, and the button shows a text and nothing else. A live run on GTK 4.22.5 showed two plain buttons. `action_button` builds the box instead, so the icons follow the icon theme of the desktop.
+
+## The window
+
+The window sets no title bar. The caption comes from the desktop, either from
+KWin or from `gtk-decoration-layout` when it asks GTK to draw one. A
+`HeaderBar` puts a second heading above the state line and takes room from the
+body. Do not add one back.
+
+The two buttons take their icons from the icon theme, so the names in
+`window.rs` must exist in it. The check that matters is a live run on the
+desktop, because no unit test can see a theme. The menu sends the same names to
+Plasma, which draws them with its own icon theme. The menu row names the
+setting and keeps the pause icon, because only the window button names the
+action.
 
 ## The tray raise
 
