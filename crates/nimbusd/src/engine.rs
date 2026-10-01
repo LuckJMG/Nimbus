@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
-use nimbus_ipc::{Phase, State};
+use nimbus_ipc::{Phase, Settings, State};
 
-use crate::config::Config;
+use crate::config::{Config, apply_settings};
 use crate::rclone::Outcome;
 
 /// A message for the engine. The watcher, the run thread, and the D-Bus
@@ -13,6 +13,8 @@ pub enum Event {
     SyncNow,
     /// A run that is active finishes. Later runs wait for a resume.
     SetPaused(bool),
+    /// Writes the keys that a client may change.
+    SetSettings(Settings),
     /// A read event does not send this, because rclone reads the folder
     /// during every run.
     Changed,
@@ -77,6 +79,7 @@ impl Engine {
         match event {
             Event::SyncNow => self.run_wanted = true,
             Event::SetPaused(paused) => self.set_paused(paused),
+            Event::SetSettings(settings) => self.set_settings(&settings),
             Event::Changed => self.last_change = Some(now),
             Event::Progress(ratio) => self.on_progress(ratio),
             Event::Finished {
@@ -133,6 +136,13 @@ impl Engine {
         if !self.running {
             self.state.phase = Phase::Idle;
         }
+    }
+
+    /// Takes the keys from a client. The shared function keeps the pause and
+    /// the resync flag, so the daemon owns both.
+    fn set_settings(&mut self, settings: &Settings) {
+        apply_settings(&mut self.cfg, settings);
+        self.dirty = true;
     }
 
     fn on_progress(&mut self, ratio: f64) {
@@ -376,6 +386,81 @@ mod tests {
         done(&mut e, Instant::now(), Outcome::Success, &[]);
         assert!(!e.config().resync_pending, "the first run used --resync");
         assert!(e.take_dirty(), "the daemon must write the config file");
+    }
+
+    #[test]
+    fn settings_from_a_client_reach_the_config_and_the_file() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        e.on_event(
+            Event::SetSettings(Settings {
+                remote: String::from("my-drive"),
+                path: String::from("Notes"),
+                local: String::from("/srv/nimbus"),
+                interval_secs: 60,
+                debounce_secs: 5,
+            }),
+            at,
+            UNIX,
+        );
+        assert_eq!(e.config().remote, "my-drive");
+        assert_eq!(e.config().interval_secs, 60);
+        assert_eq!(e.config().debounce_secs, 5);
+        assert!(e.take_dirty(), "the daemon must write the config file");
+    }
+
+    // A client that writes every key would clear the flag that a lost
+    // connection needs, so the engine must not take a resync from the wire.
+    #[test]
+    fn settings_from_a_client_keep_the_daemon_keys() {
+        let mut e = engine(|cfg| {
+            cfg.paused = true;
+            cfg.resync_pending = false;
+        });
+        e.on_event(
+            Event::SetSettings(Settings {
+                remote: String::from("gdrive"),
+                path: String::from("Nimbus"),
+                local: String::from("/srv/nimbus"),
+                interval_secs: 900,
+                debounce_secs: 30,
+            }),
+            Instant::now(),
+            UNIX,
+        );
+        assert!(e.config().paused, "the daemon owns the pause");
+        assert!(
+            !e.config().resync_pending,
+            "the paths did not move, so no resync was needed"
+        );
+    }
+
+    // The engine reads both timers on every tick, so a new value applies to
+    // the next tick and not after a restart.
+    #[test]
+    fn a_new_timer_applies_to_the_next_tick() {
+        let at = Instant::now();
+        let mut e = engine(|cfg| cfg.interval_secs = 900);
+        done(&mut e, at, Outcome::Success, &[]);
+        e.on_event(
+            Event::SetSettings(Settings {
+                remote: String::from("gdrive"),
+                path: String::from("Nimbus"),
+                local: String::from("/srv/nimbus"),
+                interval_secs: 60,
+                debounce_secs: 30,
+            }),
+            at,
+            UNIX,
+        );
+        assert!(
+            !e.wants_run(at + Duration::from_secs(59)),
+            "the quiet time must hold the run back"
+        );
+        assert!(
+            e.wants_run(at + Duration::from_secs(61)),
+            "the new timer must fire"
+        );
     }
 
     // A run that left a listing behind is already recoverable, because rclone

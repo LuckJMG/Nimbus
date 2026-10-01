@@ -31,8 +31,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 95 tests pass today: 2 in `nimbus-ipc`, 65 in the `nimbusd`
-library, 2 in the `nimbusd` binary, and 26 in `nimbus`.
+runs the same three. 113 tests pass today: 3 in `nimbus-ipc`, 72 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 33 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -236,6 +236,67 @@ thread waits for the same lock. The loop takes it back the instant it releases, 
 the first D-Bus call works and every later one times out. No unit test finds this,
 because a unit test calls the engine directly and never involves a second thread.
 
+## The settings dialog
+
+The tray holds two windows: `window.rs` for the status and `settings.rs` for
+the keys. The daemon owns the config file and stays the only writer, because it
+writes that file on every pause toggle and on every resync flag change. The
+dialog talks to the daemon over D-Bus instead of touching the file.
+
+Four traps, all hit and all fixed. Read these before touching `settings.rs`.
+
+- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries five
+  primitive keys. `Config` also holds `paused` and `resync_pending`, and a client
+  that wrote either one would clear a flag that keeps rclone running.
+- `LocalDir` keeps a tilde for the file and drops it for rclone. The wire field
+  is a plain `String`, so `LocalDir::path()` and `LocalDir::text()` are both
+  needed, and the tilde must survive a save through the dialog.
+- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssstt)`, and
+  `settings_signature_is_stable` holds it.
+- `Adjustment::new` takes six arguments in GTK 4, with `page_size` last. The
+  spin button carries the range, so the dialog cannot send a value the daemon
+  refuses.
+
+A moved `remote`, `path`, or `local` has no bisync listing, because rclone names
+its listing after the pair of paths. So `apply_settings` raises
+`resync_pending`, which costs one full pass. The comparison is on the folder
+that rclone opens, because a text change that keeps the folder must not cost a
+resync.
+
+A refusal arrives as a `zbus::Error::MethodError`, and its `detail` holds the
+words from `check()`. Every other error is the bus or the daemon process, and a
+zbus message there names a transport problem instead of a cause, so `refuse`
+falls back to "The daemon is not running".
+
+The dialog is built once and reused. A rebuild would throw away a half-typed
+value, and it would leave the panel with two windows for one click.
+
+### The live check for the dialog
+
+The menu row still reads "Settings", and it no longer opens the status window,
+so the menu test in `tray.rs` is unchanged.
+
+The daemon side needs no click, so read it over the bus first:
+
+```console
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssstt" "" Nimbus /tmp/scratch/local 60 3
+```
+
+The second call must fail with "the config key remote is empty", and the config
+file must be unchanged afterwards.
+
+Then move the folder and read the log. A save that leaves `local` alone must
+produce no new line, and a save that moves it must name the new folder:
+
+```console
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssstt" drive Nimbus /tmp/scratch/local2 60 3
+```
+
+After that line, a file change in `/tmp/scratch/local2` must start a run, and a
+file change in `/tmp/scratch/local` must not. Create `local2` first, because
+`check` refuses a folder that does not exist.
+
 ## The tray
 
 Two threads. GTK runs on the main thread, because a GTK loop must start on the
@@ -424,6 +485,8 @@ stays as a second line of defence.
 - Pause does not stop a running sync. It skips later runs. The run thread checks the flag between output lines, so a pause lands within about a second.
 - The `sync` mode was removed on purpose. `rclone sync` deletes remote files that are missing locally, and `bisync` reports conflicts instead.
 - The tray reads the state every 2 seconds instead of listening for `Changed`. A failed read is how the tray learns that the daemon stopped, because a dropped signal looks the same as an idle daemon.
+- The settings dialog stops the two timers at 86400 seconds, one day. The config file has no upper bound, so a value above that needs the file. A lower bound of one exists because `check` refuses zero.
+- The daemon moves its file watcher when `local` moves, because the kernel holds the watch and the config does not. The move sits behind a comparison on the expanded path, so a settings save that left `local` alone rebuilds nothing. `follow` in `nimbusd/src/main.rs` is that comparison, and a test holds both sides.
 - The panel can drop the tray item, for example on a panel reload. The tray logs the event and stays up, because the window still works. A panel reload brings the icon back.
 - A tray click raises the window only while it is hidden. A visible window keeps its place, and a minimized one stays minimized. The compositor decides this, and it needs an `xdg_activation_token_v1`. The details are in "The tray raise" below.
 

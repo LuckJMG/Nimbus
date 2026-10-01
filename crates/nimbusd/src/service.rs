@@ -1,8 +1,9 @@
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use nimbus_ipc::State;
+use nimbus_ipc::{Settings, State};
 
+use crate::config;
 use crate::engine::{Engine, Event};
 
 /// The D-Bus surface of the daemon. The service reads the state and sends
@@ -29,6 +30,29 @@ impl NimbusService {
 
     fn set_paused(&self, paused: bool) -> zbus::fdo::Result<()> {
         self.send(Event::SetPaused(paused))
+    }
+
+    fn get_settings(&self) -> Settings {
+        config::settings_of(self.engine.lock().expect("the engine lock").config())
+    }
+
+    /// Rejects the keys before the engine sees them.
+    ///
+    /// The check runs on a copy, because the engine holds the only live
+    /// config. The message from `check` names the key and tells the user what
+    /// to do, so it reaches the dialog unchanged.
+    fn set_settings(&self, settings: Settings) -> zbus::fdo::Result<()> {
+        let mut candidate = self
+            .engine
+            .lock()
+            .expect("the engine lock")
+            .config()
+            .clone();
+        config::apply_settings(&mut candidate, &settings);
+        if let Err(err) = candidate.check() {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("{err}")));
+        }
+        self.send(Event::SetSettings(settings))
     }
 
     #[zbus(property)]

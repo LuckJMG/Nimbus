@@ -1,6 +1,6 @@
 //! The D-Bus contract between the Nimbus daemon and its clients.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Type, Value};
 // The macro attribute below takes a string literal, so it cannot read these
@@ -37,6 +37,21 @@ pub struct State {
     pub last_error: String,
 }
 
+/// The keys that a client may change.
+///
+/// The struct is not the config file of the daemon. The pause and the resync
+/// flag stay in `nimbusd`, because the daemon needs both for its own
+/// bookkeeping. The local folder is a plain string here, because the wire
+/// carries the text of the file and lets the daemon expand the home mark.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct Settings {
+    pub remote: String,
+    pub path: String,
+    pub local: String,
+    pub interval_secs: u64,
+    pub debounce_secs: u64,
+}
+
 #[proxy(
     interface = "io.github.luckjmg.nimbus1",
     default_service = "io.github.luckjmg.nimbus",
@@ -49,6 +64,13 @@ pub trait Nimbus {
     /// Pauses the daemon. The daemon skips all later runs until you call the
     /// method again.
     fn set_paused(&self, paused: bool) -> zbus::Result<()>;
+
+    /// Reads the keys that a client may change.
+    fn get_settings(&self) -> zbus::Result<Settings>;
+
+    /// Writes the keys and saves them. The daemon refuses a value that it
+    /// cannot use, and the message from the refusal reaches the caller.
+    fn set_settings(&self, settings: Settings) -> zbus::Result<()>;
 
     // The interface has no SetMode method. The daemon runs rclone bisync.
 
@@ -90,5 +112,11 @@ mod tests {
     #[test]
     fn state_signature_is_stable() {
         assert_eq!(State::SIGNATURE, "(sdts)");
+    }
+    /// The same risk holds for Settings. A reorder compiles cleanly and moves
+    /// every value into the wrong field at runtime.
+    #[test]
+    fn settings_signature_is_stable() {
+        assert_eq!(Settings::SIGNATURE, "(ssstt)");
     }
 }

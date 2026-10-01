@@ -1,3 +1,4 @@
+mod settings;
 mod tray;
 mod view;
 mod window;
@@ -17,7 +18,7 @@ use ksni::blocking::TrayMethods;
 use nimbus_ipc::NimbusProxyBlocking;
 
 use tray::{Icon, NimbusTray};
-use view::{Action, View, is_paused};
+use view::{Action, Reply, View, is_paused};
 
 /// The seconds since the Unix epoch, which is the unit of `State::last_run`.
 fn unix_now() -> u64 {
@@ -76,7 +77,7 @@ fn start() -> Result<gtk::Application> {
 
     let view = Arc::new(Mutex::new(View::Offline));
     let (action_tx, action_rx) = mpsc::channel::<Action>();
-    let (show_tx, show_rx) = mpsc::channel::<()>();
+    let (reply_tx, reply_rx) = mpsc::channel::<Reply>();
 
     let app = gtk::Application::builder()
         .application_id(APP_ID)
@@ -88,14 +89,15 @@ fn start() -> Result<gtk::Application> {
         action_tx: action_tx.clone(),
         hold: RefCell::new(None),
         window: RefCell::new(None),
+        dialog: RefCell::new(None),
         // The activate callback runs more than once, so it cannot move these
         // out on the first call. The first call takes them.
         start: RefCell::new(Some(Start {
             proxy,
             actions: action_rx,
             menu: action_tx,
-            show: show_tx,
-            requests: show_rx,
+            show: reply_tx,
+            requests: reply_rx,
         })),
         started: AtomicBool::new(false),
     });
@@ -115,13 +117,17 @@ fn start() -> Result<gtk::Application> {
 
         let window = Rc::new(window::build(app, ui.action_tx.clone()));
         *ui.window.borrow_mut() = Some(Rc::clone(&window));
+        // The dialog is built once and never shown here, because it opens only
+        // from the menu. A window with no values would show empty fields.
+        let dialog = Rc::new(settings::build(app, ui.action_tx.clone()));
+        *ui.dialog.borrow_mut() = Some(Rc::clone(&dialog));
 
         let start = ui
             .start
             .borrow_mut()
             .take()
             .expect("the first activation starts the worker");
-        refresh_loop(&ui, &window, start.requests);
+        refresh_loop(&ui, &window, &dialog, start.requests);
         window.root.present();
 
         let worker = Worker {
@@ -142,43 +148,55 @@ fn start() -> Result<gtk::Application> {
     Ok(app)
 }
 
-/// What the first activation hands to the worker thread. The window and the
+/// What the first activation hands to the worker thread. The windows and the
 /// worker share one channel, so both kinds of request use the same router.
 struct Start {
     proxy: NimbusProxyBlocking<'static>,
     actions: Receiver<Action>,
     menu: Sender<Action>,
-    show: Sender<()>,
-    requests: Receiver<()>,
+    show: Sender<Reply>,
+    requests: Receiver<Reply>,
 }
 
 /// The state the activate callback needs on the main thread.
 struct Ui {
     view: Arc<Mutex<View>>,
-    /// Cloned into the window, which sends the button presses.
+    /// Cloned into both windows, which send the button presses.
     action_tx: Sender<Action>,
     /// Dropping the guard would release the hold, so the guard stays here.
     hold: RefCell<Option<gtk::gio::ApplicationHoldGuard>>,
     window: RefCell<Option<Rc<window::App>>>,
+    /// The dialog is built beside the status window and then reused, because a
+    /// rebuild would throw away a half-typed value.
+    dialog: RefCell<Option<Rc<settings::App>>>,
     start: RefCell<Option<Start>>,
     started: AtomicBool,
 }
 
-/// The one main loop timer. It presents the window when the worker asks, and
-/// it rewrites the labels when the view moved.
-fn refresh_loop(ui: &Rc<Ui>, app: &Rc<window::App>, requests: Receiver<()>) {
-    // The window outlives the timer only if the host keeps it. A weak
-    // reference lets the timer find out instead of assuming.
+/// The one main loop timer. It moves the windows when the worker asks, and it
+/// rewrites the labels when the view moved.
+///
+/// One timer serves both windows, because a second timer would need a second
+/// glib source and both read the same channels.
+fn refresh_loop(
+    ui: &Rc<Ui>,
+    app: &Rc<window::App>,
+    dialog: &Rc<settings::App>,
+    requests: Receiver<Reply>,
+) {
+    // A window outlives the timer only if the host keeps it. A weak reference
+    // lets the timer find out instead of assuming.
     let weak: WeakRef<gtk::Window> = WeakRef::new();
     weak.set(Some(&app.root));
+    // The dialog needs its own handle for the fields, so the timer keeps a
+    // strong reference. A weak one would leave nothing to write the keys into.
+    let editor = Rc::clone(dialog);
     let view = Arc::clone(&ui.view);
     let shown = Rc::clone(app);
     let mut last: Option<View> = None;
     gtk::glib::timeout_add_local(TICK, move || {
-        while requests.try_recv().is_ok() {
-            if let Some(root) = weak.upgrade() {
-                root.present();
-            }
+        while let Ok(reply) = requests.try_recv() {
+            deliver(reply, &weak, &editor);
         }
         let current = view.lock().expect("the view lock").clone();
         if last.as_ref() != Some(&current) {
@@ -189,13 +207,36 @@ fn refresh_loop(ui: &Rc<Ui>, app: &Rc<window::App>, requests: Receiver<()>) {
     });
 }
 
+/// Carries out one reply from the worker.
+///
+/// A refusal shows the dialog, because the text belongs there. The dialog comes
+/// forward with the message, because a hidden dialog cannot show it.
+fn deliver(reply: Reply, window: &WeakRef<gtk::Window>, dialog: &settings::App) {
+    match reply {
+        Reply::Show => {
+            if let Some(root) = window.upgrade() {
+                root.present();
+            }
+        }
+        Reply::Settings(keys) => {
+            dialog.apply(&keys);
+            dialog.root.present();
+        }
+        Reply::Saved => dialog.close(),
+        Reply::Refused(text) => {
+            dialog.refuse(&text);
+            dialog.root.present();
+        }
+    }
+}
+
 /// Everything the tray needs, on a thread that is not the GTK main loop.
 struct Worker {
     view: Arc<Mutex<View>>,
     proxy: NimbusProxyBlocking<'static>,
     actions: Receiver<Action>,
     menu: Sender<Action>,
-    show: Sender<()>,
+    show: Sender<Reply>,
 }
 
 impl Worker {
@@ -241,13 +282,13 @@ impl Worker {
 }
 
 /// Carries out one action. The worker resolves the pause toggle, so the click
-/// sites never need to know the current state. The window belongs to the main
-/// thread, so that request goes across as a message.
+/// sites never need to know the current state. The windows belong to the main
+/// thread, so those requests go across as a message.
 fn send(
     action: Action,
     proxy: &NimbusProxyBlocking<'_>,
     view: &Arc<Mutex<View>>,
-    show: &Sender<()>,
+    show: &Sender<Reply>,
 ) {
     let result = match action {
         Action::SyncNow => proxy.sync_now(),
@@ -256,11 +297,96 @@ fn send(
             proxy.set_paused(next)
         }
         Action::ShowWindow => {
-            let _ = show.send(());
+            let _ = show.send(Reply::Show);
             return;
         }
+        Action::OpenSettings => return open_settings(proxy, show),
+        Action::SaveSettings(keys) => return save_settings(keys, proxy, show),
     };
     if let Err(err) = result {
         eprintln!("nimbus: the daemon refused the request: {err}");
+    }
+}
+
+/// Reads the keys for the dialog.
+///
+/// A daemon that does not run answers with a refusal, so the dialog says why
+/// it cannot open instead of showing empty fields.
+fn open_settings(proxy: &NimbusProxyBlocking<'_>, show: &Sender<Reply>) {
+    let reply = match proxy.get_settings() {
+        Ok(keys) => Reply::Settings(keys),
+        Err(err) => refuse(err),
+    };
+    let _ = show.send(reply);
+}
+
+/// Writes the keys. The daemon checks them, so a refusal arrives here and goes
+/// into the dialog.
+fn save_settings(
+    keys: nimbus_ipc::Settings,
+    proxy: &NimbusProxyBlocking<'_>,
+    show: &Sender<Reply>,
+) {
+    let reply = match proxy.set_settings(keys) {
+        Ok(()) => Reply::Saved,
+        Err(err) => refuse(err),
+    };
+    let _ = show.send(reply);
+}
+
+/// Turns a failed call into a reply.
+///
+/// Only a reply from the daemon carries words that the user can act on. Every
+/// other failure is the bus or the daemon process, so the dialog says that
+/// the daemon is not running instead of passing on a zbus message.
+fn refuse(err: zbus::Error) -> Reply {
+    let said = match &err {
+        zbus::Error::MethodError(_, detail, _) => detail.clone(),
+        zbus::Error::FDO(inner) => Some(inner.to_string()),
+        _ => None,
+    };
+    let text = said_or_missing(said);
+    eprintln!("nimbus: the daemon refused the request: {text}");
+    Reply::Refused(text)
+}
+
+/// The words for the dialog, or the missing-daemon text.
+///
+/// Only a refusal carries words that the user can act on. Every other failure
+/// came from the bus or from the daemon process, and a zbus message there names
+/// a transport problem instead of a cause.
+fn said_or_missing(said: Option<String>) -> String {
+    said.unwrap_or_else(|| String::from("The daemon is not running"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A daemon that does not run sends a name error, which carries no words for
+    // the user. The dialog then names the cause instead of passing on a zbus
+    // message about the bus.
+    #[test]
+    fn a_missing_daemon_says_so_in_the_dialog() {
+        assert_eq!(
+            refuse(zbus::Error::NameTaken),
+            Reply::Refused(String::from("The daemon is not running"))
+        );
+    }
+
+    // A refusal arrives as a method error, and its detail holds the words that the
+    // daemon wrote. The dialog shows them without the D-Bus name in front.
+    #[test]
+    fn a_refusal_shows_the_words_from_the_daemon() {
+        let said = said_or_missing(Some(String::from(
+            "the config key remote is empty. Set a remote name.",
+        )));
+        assert_eq!(said, "the config key remote is empty. Set a remote name.");
+    }
+
+    // A bus failure reaches the same dialog, and it has no words to pass on.
+    #[test]
+    fn a_bus_failure_says_the_daemon_is_not_running() {
+        assert_eq!(said_or_missing(None), "The daemon is not running");
     }
 }

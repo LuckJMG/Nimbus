@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +75,16 @@ fn claim_bus_name(conn: &zbus::blocking::Connection) -> Result<bool> {
     Ok(false)
 }
 
+/// Returns the folder when the watcher must move.
+///
+/// The function returns `None` on every turn where the folder did not move, so
+/// the inotify work and its failure mode stay behind a change. The comparison
+/// is on the folder that rclone opens, because a text change in the config
+/// keeps the same folder when the two names differ only in a trailing slash.
+fn follow(wanted: &Path, watching: &Path) -> Option<PathBuf> {
+    (wanted != watching).then(|| wanted.to_path_buf())
+}
+
 /// Watches the local folder and sends an event for every write.
 fn watch_folder(events: &Sender<Event>, local: &Path) -> Result<notify::RecommendedWatcher> {
     let events = events.clone();
@@ -97,6 +107,10 @@ fn watch_folder(events: &Sender<Event>, local: &Path) -> Result<notify::Recommen
 struct Turn {
     run: Option<(config::Config, Arc<AtomicBool>)>,
     save: Option<config::Config>,
+    /// The folder that the watcher must follow. It is `None` on every turn
+    /// where the folder did not move, so the watch is never rebuilt for a
+    /// settings save that left `local` alone.
+    watch: Option<PathBuf>,
     state: State,
 }
 
@@ -146,15 +160,15 @@ fn serve(cfg: config::Config) -> Result<()> {
     }
     eprintln!("nimbusd: serving {INTERFACE} at {OBJECT_PATH}");
 
-    let local = engine
+    // The watcher must stay alive for the whole loop. When it drops, the
+    // kernel closes the notify descriptor and the daemon sees no change.
+    let mut watching = engine
         .lock()
         .expect("the engine lock")
         .config()
         .local
         .path();
-    // The watcher must stay alive for the whole loop. When it drops, the
-    // kernel closes the notify descriptor and the daemon sees no change.
-    let _watcher = watch_folder(&tx, &local)?;
+    let mut watcher = watch_folder(&tx, &watching)?;
 
     let mut last_sent: Option<State> = None;
     loop {
@@ -181,6 +195,9 @@ fn serve(cfg: config::Config) -> Result<()> {
                     .wants_run(Instant::now())
                     .then(|| (e.config().clone(), Arc::clone(&pause))),
                 save: e.take_dirty().then(|| e.config().clone()),
+                // The comparison is on the folder that rclone opens, so a text
+                // change that keeps the folder rebuilds nothing.
+                watch: follow(&e.config().local.path(), &watching),
                 state: e.snapshot().clone(),
             }
         };
@@ -190,6 +207,15 @@ fn serve(cfg: config::Config) -> Result<()> {
         }
         if let Some(cfg) = turn.save {
             config::save(&cfg).context("the daemon cannot write the config file")?;
+        }
+        if let Some(next) = turn.watch {
+            // The new watcher is built first, so a failure leaves the old one
+            // in place and the daemon keeps working.
+            let fresh = watch_folder(&tx, &next)?;
+            drop(watcher);
+            watcher = fresh;
+            watching = next;
+            eprintln!("nimbusd: watching {}", watching.display());
         }
         announce(&conn, &mut last_sent, &turn.state);
     }
@@ -240,6 +266,28 @@ mod tests {
         ] {
             assert!(!is_trigger(&kind), "{kind:?} must not start a run");
         }
+    }
+
+    // The heavy branch must stay behind a real change. A settings save that
+    // leaves the folder alone must not touch the inotify handle.
+    #[test]
+    fn the_watcher_stays_when_the_folder_did_not_move() {
+        let watched = Path::new("/srv/Nimbus");
+        assert_eq!(follow(Path::new("/srv/Nimbus"), watched), None);
+    }
+
+    // The config holds text and rclone opens a folder. A trailing slash names
+    // the same folder, so the comparison must ignore the text.
+    #[test]
+    fn a_rewritten_folder_name_does_not_move_the_watcher() {
+        let watched = Path::new("/srv/Nimbus");
+        assert_eq!(follow(Path::new("/srv/Nimbus/"), watched), None);
+    }
+
+    #[test]
+    fn a_moved_folder_asks_for_a_new_watcher() {
+        let wanted = follow(Path::new("/srv/Other"), Path::new("/srv/Nimbus"));
+        assert_eq!(wanted, Some(PathBuf::from("/srv/Other")));
     }
 
     // A taken name is the one error that only the user can fix. Every other

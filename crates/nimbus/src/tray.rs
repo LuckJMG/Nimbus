@@ -166,12 +166,14 @@ impl ksni::Tray for NimbusTray {
             }),
             MenuItem::Separator,
             MenuItem::Standard(StandardItem {
+                // The row opens the dialog. It cannot open the status window,
+                // because the status window has no field to change.
                 label: String::from("Settings"),
                 icon_name: String::from("preferences-system-symbolic"),
                 activate: {
                     let settings_actions = self.actions.clone();
                     Box::new(move |_| {
-                        let _ = settings_actions.send(Action::ShowWindow);
+                        let _ = settings_actions.send(Action::OpenSettings);
                     })
                 },
                 ..Default::default()

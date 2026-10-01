@@ -79,6 +79,7 @@ rclone config
 
 The daemon reads one file. It writes the file with the default settings on the
 first start, so start the daemon once, then edit the file and start it again.
+The Settings dialog of the tray writes the same file while the daemon runs.
 
 ```
 ~/.config/nimbus/config.toml
@@ -126,8 +127,16 @@ instead.
 | The first row | The phase and the last error. The row is not a command. |
 | Sync now | Starts a run. The call returns before the run finishes. |
 | Pause | Skips later runs. A run that is active finishes first. |
-| Settings | Opens the window. |
+| Settings | Opens the dialog for the keys in the table above. |
 | Quit | Stops the tray. The daemon keeps running. |
+
+The Settings row opens a dialog for `remote`, `path`, `local`, `interval_secs`,
+and `debounce_secs`. The daemon takes the new keys at once and writes the file.
+A time above 86400 needs the file, because the dialog stops at one day.
+
+A moved `remote`, `path`, or `local` has no bisync listing, so the daemon sets
+`resync_pending` and the next run carries `--resync`. One full pass over both
+sides follows.
 
 ## The D-Bus API
 
@@ -139,7 +148,7 @@ Any client can read the state and send the same commands.
 | Object path | `/io/github/luckjmg/nimbus` |
 | Interface | `io.github.luckjmg.nimbus1` |
 | Property | `State`, signature `(sdts)` |
-| Methods | `SyncNow`, `SetPaused(b)` |
+| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssstt)` |
 | Signal | `Changed(State)` |
 
 The four values of the signature are the phase as a string, the progress as a
@@ -152,6 +161,15 @@ busctl --user get-property io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SyncNow
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssstt gdrive Nimbus '~/Nimbus' 900 30
+```
+
+The five values of `ssstt` are `remote`, `path`, `local`, `interval_secs`, and
+`debounce_secs`. A refusal names the key, for example:
+
+```console
+Call failed: the config key remote is empty. Set a remote name.
 ```
 
 `busctl --user monitor` does not filter by name. Watch the signal with:

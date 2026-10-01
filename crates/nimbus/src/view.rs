@@ -1,8 +1,8 @@
-use nimbus_ipc::{Phase, State};
+use nimbus_ipc::{Phase, Settings, State};
 
-/// What a menu item asks the main loop to do. The menu callback must not block,
-/// so it only sends on a channel.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What a menu item or a button asks the tray to do. The GTK callbacks must
+/// not block, so they only send on a channel.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     SyncNow,
     /// The worker resolves the toggle against the view, so the click sites
@@ -11,6 +11,27 @@ pub enum Action {
     /// Asks the main thread to show the window. The worker owns the relay,
     /// because it is the only place that knows which thread an action needs.
     ShowWindow,
+    /// Asks the worker for the keys. The blocking call stays off the GTK
+    /// thread, so the answer comes back as a `Reply`.
+    OpenSettings,
+    /// Carries the edited keys to the worker, which owns the proxy.
+    SaveSettings(Settings),
+}
+
+/// What the worker sends back to the GTK thread.
+///
+/// The worker owns the blocking proxy, so every answer crosses a channel. The
+/// dialog belongs to the main thread, so the reply decides which window moves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reply {
+    /// Brings the status window forward.
+    Show,
+    /// Rewrites the fields of the dialog with these keys.
+    Settings(Settings),
+    /// The daemon took the keys, so the dialog closes.
+    Saved,
+    /// The daemon refused. The text goes in the dialog.
+    Refused(String),
 }
 
 /// What the tray shows. The daemon may not run, so the state is optional.
