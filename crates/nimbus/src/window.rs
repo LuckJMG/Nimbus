@@ -11,6 +11,9 @@ use crate::view::{Action, View, is_paused, status_name};
 pub const SYNC_ICON: &str = "view-refresh-symbolic";
 pub const PAUSE_ICON: &str = "media-playback-pause-symbolic";
 pub const RESUME_ICON: &str = "media-playback-start-symbolic";
+/// The tray menu sends the same name to Plasma, so the window and the menu
+/// draw one icon for one action.
+pub const SETTINGS_ICON: &str = "preferences-system-symbolic";
 
 /// States the last run in words. An absolute timestamp needs a date library
 /// and a time zone, and the tray has no room for it either way.
@@ -146,15 +149,32 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     });
 
     let (pause, pause_icon, pause_text) = action_button(PAUSE_ICON, "Pause");
-    let pause_actions = actions;
+    let pause_actions = actions.clone();
     pause.connect_clicked(move |_| {
         let _ = pause_actions.send(Action::TogglePaused);
     });
 
+    // The button opens the same dialog as the menu row, so the window needs no
+    // field of its own and no second route to the keys.
+    let (settings, _, _) = action_button(SETTINGS_ICON, "Settings");
+    let settings_actions = actions;
+    settings.connect_clicked(move |_| {
+        let _ = settings_actions.send(Action::OpenSettings);
+    });
+
+    // The two run buttons sit at the start. Settings sits at the end, because
+    // it opens a dialog instead of running a sync, so it is not one of them.
+    let runs = GtkBox::new(Orientation::Horizontal, 8);
+    runs.set_halign(Align::Start);
+    // The box takes the room that the row leaves, so the settings button moves
+    // to the far end instead of sitting next to the two run buttons.
+    runs.set_hexpand(true);
+    runs.append(&sync);
+    runs.append(&pause);
+
     let buttons = GtkBox::new(Orientation::Horizontal, 8);
-    buttons.set_halign(Align::Start);
-    buttons.append(&sync);
-    buttons.append(&pause);
+    buttons.append(&runs);
+    buttons.append(&settings);
 
     let body = GtkBox::new(Orientation::Vertical, 12);
     body.set_margin_top(12);
