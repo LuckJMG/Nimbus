@@ -115,18 +115,23 @@ struct Turn {
 }
 
 fn main() -> Result<()> {
-    let cfg = config::load()?;
-    if let Err(err) = cfg.check() {
-        eprintln!("nimbusd: {err}");
-        eprintln!(
-            "nimbusd: the config file is {}",
-            config::default_file().display()
-        );
-        eprintln!("nimbusd: fix the settings, then start the daemon again");
-        // A clean refusal exits with zero. Only the user can fix the settings,
-        // so a restart would fail in the same way and fill the journal.
-        return Ok(());
-    }
+    // A config that does not parse is a bad config too, so it takes the same
+    // clean refusal as one that fails the check.
+    let cfg = match config::load().and_then(|cfg| cfg.check().map(|()| cfg)) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("nimbusd: {err}");
+            eprintln!(
+                "nimbusd: the config file is {}",
+                config::default_file().display()
+            );
+            eprintln!("nimbusd: fix the settings, then start the daemon again");
+            // A clean refusal exits with zero. Only the user can fix the
+            // settings, so a restart would fail in the same way and fill the
+            // journal.
+            return Ok(());
+        }
+    };
     eprintln!(
         "nimbusd: syncing {} with {}",
         cfg.local.path().display(),
