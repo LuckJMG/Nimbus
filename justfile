@@ -107,7 +107,7 @@ uninstall-user:
     rm -f {{home}}/.local/bin/nimbusd {{home}}/.local/bin/nimbus
     rm -f {{home}}/.local/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     rm -f {{home}}/.local/share/applications/io.github.luckjmg.Nimbus.desktop
-    for name in sync idle syncing paused offline error; do rm -f {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg; done
+    for name in idle syncing paused offline error; do rm -f {{home}}/.local/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg; done
     systemctl --user daemon-reload
 
 # Remove the files that install added. Needs root.
@@ -116,6 +116,6 @@ uninstall:
     sudo rm -f {{prefix}}/lib/systemd/user/nimbusd.service
     sudo rm -f {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sudo rm -f {{prefix}}/share/applications/io.github.luckjmg.Nimbus.desktop
-    for name in sync idle syncing paused offline error; do sudo rm -f {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg; done
+    for name in idle syncing paused offline error; do sudo rm -f {{prefix}}/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg; done
     sudo rm -f {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     systemctl --user daemon-reload

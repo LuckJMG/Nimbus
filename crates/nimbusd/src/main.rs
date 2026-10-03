@@ -111,7 +111,7 @@ fn notify_refusal(body: &str) {
             &(
                 "Nimbus",
                 0u32,
-                "nimbus-sync-symbolic",
+                "nimbus-idle-symbolic",
                 "Nimbus did not start",
                 body,
                 Vec::<&str>::new(),
