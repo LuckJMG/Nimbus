@@ -8,41 +8,32 @@ use nimbus_ipc::Phase;
 use crate::view::{Action, View, is_paused, is_syncing, phase, status_name, status_text};
 use crate::window::{PAUSE_ICON, SYNC_ICON};
 
-/// The icon file inside a theme directory. The `-symbolic` name suffix is not
-/// decoration. GTK reads it to recolor the icon with the foreground of the
-/// desktop, and KDE reads the style block inside the file for the same job.
-const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-sync-symbolic.svg";
-const ICON: &str = "nimbus-sync-symbolic";
+/// One icon file that every install ships, so its presence proves the theme
+/// directory. The `-symbolic` name suffix is not decoration. GTK reads it to
+/// recolor the icon with the foreground of the desktop, and KDE reads the style
+/// block inside the file for the same job.
+const ICON_FILE: &str = "hicolor/scalable/apps/nimbus-idle-symbolic.svg";
 const FALLBACK: &str = "folder-sync";
 
-/// The icon name, plus the theme directory when the host needs one to find it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Icon {
-    pub name: String,
-    pub theme_path: String,
-}
-
-impl Icon {
-    pub fn resolve() -> Self {
-        let source = source_icon_dir();
-        if Path::new(&source).join(ICON_FILE).is_file() {
-            return pick(Some(source), None);
-        }
-        pick(None, installed_icon_dir())
+/// Finds the theme directory that holds the icons. `None` means the tray shows
+/// the fallback icon from the theme of the desktop.
+pub fn icon_dir() -> Option<String> {
+    let source = source_icon_dir();
+    if Path::new(&source).join(ICON_FILE).is_file() {
+        return Some(source);
     }
+    installed_icon_dir().map(|dir| dir.to_string_lossy().into_owned())
 }
 
-/// Picks the icon. The caller supplies both candidates, so a test decides them
-/// without depending on what happens to be installed on the machine.
-pub fn pick(source: Option<String>, installed: Option<PathBuf>) -> Icon {
-    let (name, theme_path) = match (source, installed) {
-        (Some(dir), _) => (ICON, dir),
-        (None, Some(dir)) => (ICON, dir.to_string_lossy().into_owned()),
-        (None, None) => (FALLBACK, String::new()),
-    };
-    Icon {
-        name: String::from(name),
-        theme_path,
+/// Returns the icon for the phase. The storm cloud means that the user must act,
+/// so an error and a resync both take it, and the tray sets no overlay.
+fn phase_icon(view: &View) -> &'static str {
+    match phase(view) {
+        None => "nimbus-offline-symbolic",
+        Some(Phase::Idle) => "nimbus-idle-symbolic",
+        Some(Phase::Syncing) => "nimbus-syncing-symbolic",
+        Some(Phase::Paused) => "nimbus-paused-symbolic",
+        Some(Phase::Error | Phase::Resync) => "nimbus-error-symbolic",
     }
 }
 
@@ -56,27 +47,17 @@ fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
     }
 }
 
-/// Returns the overlay icon. An empty name means no overlay, which is what the
-/// specification asks for.
-fn overlay(view: &View) -> String {
-    match phase(view) {
-        Some(Phase::Error) => String::from("dialog-error"),
-        Some(Phase::Resync) => String::from("dialog-warning"),
-        _ => String::new(),
-    }
-}
-
 pub struct NimbusTray {
     view: Arc<Mutex<View>>,
-    icon: Icon,
+    icon_dir: Option<String>,
     actions: Sender<Action>,
 }
 
 impl NimbusTray {
-    pub fn new(view: Arc<Mutex<View>>, icon: Icon, actions: Sender<Action>) -> Self {
+    pub fn new(view: Arc<Mutex<View>>, icon_dir: Option<String>, actions: Sender<Action>) -> Self {
         Self {
             view,
-            icon,
+            icon_dir,
             actions,
         }
     }
@@ -106,19 +87,18 @@ impl ksni::Tray for NimbusTray {
     }
 
     fn icon_name(&self) -> String {
-        self.icon.name.clone()
+        match self.icon_dir {
+            Some(_) => String::from(phase_icon(&self.current())),
+            None => String::from(FALLBACK),
+        }
     }
 
     fn icon_theme_path(&self) -> String {
-        self.icon.theme_path.clone()
+        self.icon_dir.clone().unwrap_or_default()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        tooltip(&self.current(), &self.icon.name)
-    }
-
-    fn overlay_icon_name(&self) -> String {
-        overlay(&self.current())
+        tooltip(&self.current(), &self.icon_name())
     }
 
     /// A left click opens the window. The menu is on a right click, because
@@ -251,11 +231,7 @@ mod tests {
 
     fn tray(view: View) -> NimbusTray {
         let (tx, _rx) = mpsc::channel();
-        NimbusTray::new(
-            Arc::new(Mutex::new(view)),
-            pick(Some(source_icon_dir()), None),
-            tx,
-        )
+        NimbusTray::new(Arc::new(Mutex::new(view)), Some(source_icon_dir()), tx)
     }
 
     fn labels(menu: &[ksni::MenuItem<NimbusTray>]) -> Vec<String> {
@@ -271,82 +247,92 @@ mod tests {
             .collect()
     }
 
+    // Each phase names its own file. A missing file passes every other test
+    // here, and the host then shows a blank item for that phase only.
     #[test]
-    fn pick_uses_the_source_directory() {
-        let icon = pick(Some(String::from("/src/data/icons")), None);
-        assert_eq!(icon.name, ICON);
-        assert_eq!(icon.theme_path, "/src/data/icons");
+    fn the_source_icon_dir_holds_every_phase_icon() {
+        let views = [
+            View::Offline(String::new()),
+            ready(Phase::Idle, ""),
+            ready(Phase::Syncing, ""),
+            ready(Phase::Paused, ""),
+            ready(Phase::Error, "x"),
+            ready(Phase::Resync, "x"),
+        ];
+        let dir = Path::new(&source_icon_dir()).join("hicolor/scalable/apps");
+        for view in &views {
+            let path = dir.join(format!("{}.svg", phase_icon(view)));
+            assert!(path.is_file(), "the icon is missing at {}", path.display());
+        }
+        assert!(Path::new(&source_icon_dir()).join(ICON_FILE).is_file());
     }
 
-    // A host looks an icon name up in its own cache, and the cache does not
-    // know an icon that was installed after the last rebuild. The path makes
-    // the host read the file. A live run on KDE showed a blank item without it.
     #[test]
-    fn pick_sends_the_installed_directory_to_the_host() {
-        let icon = pick(None, Some(PathBuf::from("/usr/share/icons")));
-        assert_eq!(icon.name, ICON);
-        assert_eq!(icon.theme_path, "/usr/share/icons");
-    }
-
-    #[test]
-    fn pick_falls_back_when_the_file_is_absent() {
-        let icon = pick(None, None);
-        assert_eq!(icon.name, FALLBACK);
-        assert!(icon.theme_path.is_empty());
-    }
-
-    // The icon directory has to reach the data directory at the root of the
-    // workspace. A wrong number of levels passes every other test here, and the
-    // tray then shows the fallback icon for no visible reason.
-    #[test]
-    fn the_source_icon_dir_holds_the_icon_file() {
-        let path = Path::new(&source_icon_dir()).join(ICON_FILE);
-        assert!(
-            path.is_file(),
-            "the icon file is missing at {}",
-            path.display()
+    fn the_icon_follows_the_phase() {
+        assert_eq!(
+            tray(ready(Phase::Idle, "")).icon_name(),
+            "nimbus-idle-symbolic"
+        );
+        assert_eq!(
+            tray(ready(Phase::Syncing, "")).icon_name(),
+            "nimbus-syncing-symbolic"
+        );
+        assert_eq!(
+            tray(ready(Phase::Paused, "")).icon_name(),
+            "nimbus-paused-symbolic"
+        );
+        assert_eq!(
+            tray(ready(Phase::Error, "x")).icon_name(),
+            "nimbus-error-symbolic"
+        );
+        assert_eq!(
+            tray(ready(Phase::Resync, "x")).icon_name(),
+            "nimbus-error-symbolic"
+        );
+        assert_eq!(
+            tray(View::Offline(String::new())).icon_name(),
+            "nimbus-offline-symbolic"
         );
     }
 
     #[test]
+    fn the_icon_falls_back_without_a_theme_dir() {
+        let (tx, _rx) = mpsc::channel();
+        let tray = NimbusTray::new(Arc::new(Mutex::new(ready(Phase::Idle, ""))), None, tx);
+        assert_eq!(tray.icon_name(), FALLBACK);
+        assert!(tray.icon_theme_path().is_empty());
+    }
+
+    #[test]
     fn the_offline_tooltip_names_the_daemon() {
-        let tip = tooltip(&View::Offline(String::new()), ICON);
+        let tip = tooltip(&View::Offline(String::new()), "x");
         assert_eq!(tip.description, "The daemon is not running");
         assert_eq!(tip.title, "Nimbus");
     }
 
     #[test]
     fn the_idle_tooltip_says_idle() {
-        assert_eq!(tooltip(&ready(Phase::Idle, ""), ICON).description, "Idle");
+        assert_eq!(tooltip(&ready(Phase::Idle, ""), "x").description, "Idle");
     }
 
     #[test]
     fn the_paused_tooltip_says_paused() {
         assert_eq!(
-            tooltip(&ready(Phase::Paused, ""), ICON).description,
+            tooltip(&ready(Phase::Paused, ""), "x").description,
             "Paused"
         );
     }
 
     #[test]
     fn the_syncing_tooltip_shows_the_ratio() {
-        let tip = tooltip(&ready(Phase::Syncing, ""), ICON);
+        let tip = tooltip(&ready(Phase::Syncing, ""), "x");
         assert_eq!(tip.description, "Syncing, 43%");
     }
 
     #[test]
     fn the_error_tooltip_shows_the_daemon_text() {
-        let tip = tooltip(&ready(Phase::Error, "Bisync aborted"), ICON);
+        let tip = tooltip(&ready(Phase::Error, "Bisync aborted"), "x");
         assert_eq!(tip.description, "Bisync aborted");
-    }
-
-    #[test]
-    fn the_overlay_appears_only_for_an_error() {
-        assert_eq!(overlay(&ready(Phase::Error, "x")), "dialog-error");
-        assert_eq!(overlay(&ready(Phase::Idle, "")), "");
-        assert_eq!(overlay(&ready(Phase::Syncing, "")), "");
-        assert_eq!(overlay(&ready(Phase::Paused, "")), "");
-        assert_eq!(overlay(&View::Offline(String::new())), "");
     }
 
     #[test]

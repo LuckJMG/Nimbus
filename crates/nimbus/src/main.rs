@@ -17,7 +17,7 @@ use gtk::prelude::*;
 use ksni::blocking::TrayMethods;
 use nimbus_ipc::NimbusProxyBlocking;
 
-use tray::{Icon, NimbusTray};
+use tray::NimbusTray;
 use view::{Action, Reply, View, is_paused};
 
 /// The seconds since the Unix epoch, which is the unit of `State::last_run`.
@@ -256,7 +256,7 @@ impl Worker {
             menu,
             show,
         } = self;
-        let tray = NimbusTray::new(Arc::clone(&view), Icon::resolve(), menu);
+        let tray = NimbusTray::new(Arc::clone(&view), tray::icon_dir(), menu);
         // A desktop with no SNI host must not end the process. The icon appears
         // when a host arrives later.
         let Ok(handle) = tray.assume_sni_available(true).spawn() else {

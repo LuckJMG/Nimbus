@@ -31,8 +31,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 128 tests pass today: 3 in `nimbus-ipc`, 81 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 126 tests pass today: 3 in `nimbus-ipc`, 81 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 37 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -477,7 +477,7 @@ Passing `org.freedesktop.Application` as the destination asks the bus about a
 different name, and the error then says nothing about the tray.
 
 A host looks an icon name up in its own cache, and the cache does not know an icon
-that was installed after the last rebuild. So `Icon::resolve` returns the installed
+that was installed after the last rebuild. So `icon_dir` returns the installed
 **directory**, not an empty theme path. A live run on KDE showed a blank tray item
 until this was fixed, and no unit test could have found it.
 
