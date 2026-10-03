@@ -1,0 +1,208 @@
+# Builds the two binaries once, packs them for Debian, Fedora, and Arch, and
+# publishes a GitHub release with the notes for the tag.
+#
+# A tag push is the only trigger. The tag holds the one version string that the
+# release notes, the tarball, and all three packages take, so no job reads a
+# version from anywhere else.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The tag of the push, with the leading v.
+env:
+  TAG: ${{ github.ref_name }}
+
+# The job that creates the release is the only one that writes.
+permissions:
+  contents: read
+
+jobs:
+  # One cargo build for all three packages. The tarball holds the binaries, the
+  # data files, the license, and the readme, so the package jobs need the repo
+  # only for the packaging files.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the GTK 4 build files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev pkg-config
+
+      - name: Use the current stable Rust
+        # rust-toolchain.toml pins the stable channel, but rustup keeps an
+        # older stable if the runner image shipped one. The workspace asks for
+        # 1.92, so the update is what makes the build start.
+        run: rustup update stable
+
+      - name: Check that the tag matches the workspace version
+        run: |
+          set -eu
+          version="${TAG#v}"
+          # A tag that disagrees with Cargo.toml puts wrong metadata in every
+          # package name, so the build stops here instead.
+          grep -qx "version = \"${version}\"" Cargo.toml
+
+      - name: Build both binaries and pack the tarball
+        run: |
+          set -eu
+          version="${TAG#v}"
+          cargo build --release --workspace
+          mkdir -p dist/nimbus
+          install -Dm755 target/release/nimbusd dist/nimbus/nimbusd
+          install -Dm755 target/release/nimbus dist/nimbus/nimbus
+          install -Dm644 LICENSE dist/nimbus/LICENSE
+          install -Dm644 README.md dist/nimbus/README.md
+          cp -r data dist/nimbus/data
+          # The payload sits in one directory that no version names, so every
+          # package tool can find it from its own name for the version.
+          tar -czf "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz" -C dist nimbus
+          sha256sum "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nimbus-tarball
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # One package per distribution. Each job runs in the container of the
+  # distribution that it packs for, so the package tools and their file layout
+  # are the ones of that distribution.
+  packages:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: deb
+            image: debian:trixie
+          - name: rpm
+            image: fedora:44
+          - name: arch
+            image: archlinux:latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nimbus-tarball
+          path: dist
+
+      - name: Pack for ${{ matrix.name }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          mkdir -p dist/payload dist/packages
+          tar -xzf "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz" --strip-components=1 -C dist/payload
+          p=dist/payload
+
+          if [ "${{ matrix.name }}" = deb ]; then
+            # Debian reads a pre-release as a tilde, so the package sorts
+            # before the final release. The last field is the Debian
+            # revision. The tilde carries a backslash, because bash 5.2 reads
+            # a bare ~ here as the home directory of the user.
+            deb_version="${version/-/\~}-1"
+            apt-get update
+            apt-get install -y git
+            sed "s/@VERSION@/${deb_version}/" packaging/deb/control > dist/control
+            r=dist/root
+            install -Dm755 "$p/nimbusd" "$r/usr/bin/nimbusd"
+            install -Dm755 "$p/nimbus" "$r/usr/bin/nimbus"
+            install -Dm644 "$p/data/systemd/user/nimbusd.service" "$r/usr/lib/systemd/user/nimbusd.service"
+            install -Dm644 "$p/data/dbus-1/services/io.github.luckjmg.Nimbus.service" "$r/usr/share/dbus-1/services/io.github.luckjmg.Nimbus.service"
+            install -Dm644 "$p/data/applications/io.github.luckjmg.Nimbus.desktop" "$r/usr/share/applications/io.github.luckjmg.Nimbus.desktop"
+            # A package cannot write into the home directory of the user, so
+            # the autostart entry takes the system path.
+            install -Dm644 "$p/data/autostart/io.github.luckjmg.Nimbus.desktop" "$r/etc/xdg/autostart/io.github.luckjmg.Nimbus.desktop"
+            for name in idle syncing paused offline error; do
+              install -Dm644 "$p/data/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg" "$r/usr/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg"
+            done
+            install -Dm644 "$p/LICENSE" "$r/usr/share/licenses/nimbus/LICENSE"
+            install -Dm644 "$p/README.md" "$r/usr/share/doc/nimbus/README.md"
+            install -Dm644 dist/control "$r/DEBIAN/control"
+            dpkg-deb --build --root-owner-group "$r" "dist/packages/nimbus_${deb_version}_amd64.deb"
+          fi
+
+          if [ "${{ matrix.name }}" = rpm ]; then
+            # RPM reads a pre-release as a tilde too, and it replaces the
+            # tilde with an underscore in the file name. The tilde carries a
+            # backslash, because bash 5.2 reads a bare ~ here as the home
+            # directory of the user.
+            rpm_version="${version/-/\~}"
+            dnf install -y git rpm-build
+            sed "s/@VERSION@/${rpm_version}/" packaging/nimbus.spec > dist/nimbus.spec
+            # The spec takes its payload from one fixed name, so the rpm does
+            # not need the version twice.
+            mkdir -p dist/rpms/SOURCES
+            cp "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz" dist/rpms/SOURCES/nimbus-src.tar.gz
+            rpmbuild --define "_topdir $PWD/dist/rpms" -bb dist/nimbus.spec
+            find dist/rpms/RPMS -name '*.rpm' -exec cp {} dist/packages/ \;
+          fi
+
+          if [ "${{ matrix.name }}" = arch ]; then
+            # Arch has no pre-release marker, so a dot takes the place of the
+            # hyphen and vercmp reads it as older than the final release.
+            arch_version="${version//-/.}"
+            sha=$(sha256sum "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)
+            pacman -Syy --noconfirm --needed git fakeroot debugedit
+            sed -e "s/@PKGVER@/${arch_version}/" -e "s/@TAGVER@/${version}/" -e "s/@SHA256@/${sha}/" packaging/PKGBUILD > dist/PKGBUILD
+            # makepkg refuses to run as root, so the build runs as a user. The
+            # home directory of that user takes the files, because the
+            # workspace belongs to root. The dependency check would want GTK 4
+            # in the container, and the package only carries the binaries that
+            # another job built, so --nodeps skips that check.
+            useradd -m builder
+            cp dist/PKGBUILD "dist/nimbus-${version}-x86_64-unknown-linux-gnu.tar.gz" /home/builder/
+            chown -R builder:builder /home/builder
+            su builder -c "cd /home/builder && makepkg -f --noconfirm --nodeps"
+            cp /home/builder/nimbus-*.pkg.tar.zst dist/packages/
+          fi
+
+      - name: Fail when the step built no package
+        run: |
+          set -eu
+          ls -l dist/packages/
+          test -n "$(find dist/packages -type f -print -quit)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nimbus-${{ matrix.name }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  # One release with the tarball and the three packages.
+  release:
+    needs: packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nimbus-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          ls -l dist/
+          # A beta is a pre-release, so the tag stays out of the latest line.
+          gh release create "$TAG" \
+            --title "Nimbus ${TAG#v}" \
+            --notes-file "docs/releases/${TAG}.md" \
+            --prerelease \
+            --verify-tag \
+            dist/*

@@ -6,7 +6,7 @@ Let it pour your files from the cloud. A linux native cloud sync tray.
 
 <https://github.com/LuckJMG/Nimbus>, maintained by LuckJMG.
 
-> **Disclaimer:** Nimbus is in alpha. AI generated 100% of this project. That
+> **Disclaimer:** Nimbus is in beta. AI generated 100% of this project. That
 > fact does not excuse its faults. Use Nimbus at your own risk. Any help to
 > improve it is welcome.
 
@@ -51,7 +51,10 @@ program can read the state and send commands over D-Bus.
 
 ## Project dependencies
 
-Before you use Nimbus, make sure that you have:
+A package brings its own build, so these apply only to the path that builds
+from the repository.
+
+Before you build Nimbus, make sure that you have:
 
 - An account on a storage service that rclone supports.
 - Rust 1.92 or later. The `gtk4` bindings declare it. The daemon alone needs 1.87, from `zbus`.
@@ -60,7 +63,11 @@ Before you use Nimbus, make sure that you have:
 - `just`, which runs the install recipes.
 - A systemd user session and a D-Bus session bus.
 
-The packages below are known to work:
+Whichever way you install Nimbus, you need rclone 1.71 or later, a systemd
+user session, and a D-Bus session bus. Each package lists the versions that
+work for the daemon and the window.
+
+The builds below are known to work:
 
 | Distribution | GTK4 | rclone | Builds |
 | --- | --- | --- | --- |
@@ -80,10 +87,53 @@ sudo apt install libgtk-4-dev rclone
 
 ## Instructions to use Nimbus
 
-To start, create a remote in rclone. Then build and install
-Nimbus, and set the folder to sync.
+To start, create a remote in rclone. Then install Nimbus, and set the folder to
+sync.
 
 ### Install Nimbus
+
+Two ways to install Nimbus exist. Install a package, or build the programs
+from the repository.
+
+#### Install a package
+
+1. Download the package for your distribution from the
+   [releases page](https://github.com/LuckJMG/Nimbus/releases).
+
+   | Distribution | File to install |
+   | --- | --- |
+   | Debian 13 | `nimbus_<version>_amd64.deb` |
+   | Fedora | `nimbus-<version>-1.fc*.x86_64.rpm` |
+   | Arch | `nimbus-<version>-1-x86_64.pkg.tar.zst` |
+
+2. Install the file with the tool of your distribution.
+
+    ```console
+    # Debian
+    sudo apt install ./nimbus_<version>_amd64.deb
+
+    # Fedora
+    sudo dnf install ./nimbus-<version>-1.fc*.x86_64.rpm
+
+    # Arch
+    sudo pacman -U ./nimbus-<version>-1-x86_64.pkg.tar.zst
+    ```
+
+    Each package installs the two programs, the systemd user unit, the D-Bus
+    service file, the app menu entry, the five icons, and an autostart entry in
+    `/etc/xdg/autostart`.
+
+3. Enable the daemon. An install runs with no session bus, so only you can
+   enable the unit.
+
+    ```console
+    systemctl --user enable --now nimbusd.service
+    ```
+
+    The tray starts at the next login. To start it now, run it from the app
+    menu.
+
+#### Build from the repository
 
 1. Create a remote in rclone. Name it `drive`, because the default remote
    path in Nimbus is `drive:/`. A different name works too, if you set it in
@@ -208,6 +258,24 @@ refuses a raise without a click of its own. The taskbar entry flashes instead.
 
 The window shows the phase, the progress, the time since the last run, and
 the last error. Each button shows only when it applies.
+
+The tray icon and the first row of the menu both show the phase:
+
+| Phase | Icon | What it means |
+| --- | --- | --- |
+| `idle` | <img src="data/icons/hicolor/scalable/apps/nimbus-idle-symbolic.svg" width="22" alt="The idle icon"> | The daemon runs and waits. No run is active. |
+| `syncing` | <img src="data/icons/hicolor/scalable/apps/nimbus-syncing-symbolic.svg" width="22" alt="The syncing icon"> | A run is active. The window shows the progress of the run. |
+| `paused` | <img src="data/icons/hicolor/scalable/apps/nimbus-paused-symbolic.svg" width="22" alt="The paused icon"> | You paused Nimbus. Later runs wait until you resume. |
+| `error` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The error icon"> | The last run failed. The line below the heading names the error. |
+| `resync` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The resync icon"> | The next run must compare every file. Click Resync, then confirm. |
+| `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | No daemon answers on the bus, so the cloud is offline for Nimbus. The window shows a Start daemon button. |
+
+`offline` is the only row without a phase on the bus. No daemon runs, so
+nothing sends one.
+
+The icon has no color of its own, so each desktop paints it with its own
+palette. A host that looks up an icon name in a cache needs a cache rebuild
+after an install. See [Troubleshoot Nimbus](#troubleshoot-nimbus).
 
 | Button | What it does |
 | --- | --- |
@@ -385,18 +453,34 @@ because the distribution builds the cache for that directory. A
 
 ### Uninstall Nimbus
 
-1. Run the recipe that matches your install.
+1. Remove Nimbus with the tool of your distribution, or run the recipe that
+   matches your build.
 
     ```console
+    # A package
+    sudo apt remove nimbus           # Debian
+    sudo dnf remove nimbus           # Fedora
+    sudo pacman -R nimbus            # Arch
+
+    # A build
     just uninstall          # after just install, needs root
     just uninstall-user     # after just install-user, needs no root
     ```
 
-2. If you want to remove your settings too, delete `~/.config/nimbus/`.
+2. Disable the daemon unit if a package installed it.
 
-    The recipes keep the config file and the rclone remote, because both hold
-    settings that you wrote. The directory also holds the `bisync/` record. A
-    fresh install then starts with no record and rebuilds it on the first run.
+    ```console
+    systemctl --user disable --now nimbusd.service
+    ```
+
+    A package does not enable the unit, so this step needs nothing.
+
+3. If you want to remove your settings too, delete `~/.config/nimbus/`.
+
+    Every recipe and every package keeps the config file and the rclone remote,
+    because both hold settings that you wrote. The directory also holds the
+    `bisync/` record. A fresh install then starts with no record and rebuilds it
+    on the first run.
 
 ## Contributing guidelines
 
@@ -408,6 +492,18 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+To cut a release, raise the `version` in `Cargo.toml`, write the release notes
+in `docs/releases/<tag>.md`, and push the tag. The tag must start with a `v`.
+A tag that disagrees with `Cargo.toml` stops the build.
+
+```console
+git tag v0.1.0-beta
+git push origin main v0.1.0-beta
+```
+
+The workflow builds the binaries, packs them for Debian, Fedora, and Arch, and
+publishes the release with the notes for the tag.
 
 The unit tests do not cover the bus, the watcher, the panel, or rclone. Those
 need a live run. `AGENTS.md` holds the procedure for the live run and the
@@ -433,8 +529,10 @@ scope, for example `feat(daemon): add the watcher and the engine loop`.
 
 For more information:
 
-- [`AGENTS.md`](AGENTS.md): the live check, the crash test, the design limits, and the traps in zbus, GTK, and rclone.
+- [`AGENTS.md`](AGENTS.md): the live check, the crash test, the packaging rules, the design limits, and the traps in zbus, GTK, and rclone.
 - [`justfile`](justfile): every build, install, and sandbox recipe, and the only list of installed files.
+- [`packaging/`](packaging): the deb, the rpm, and the Arch package definitions.
+- [`docs/releases/`](docs/releases): the release notes for each tag.
 - [rclone bisync](https://rclone.org/bisync/): the rclone command that Nimbus runs.
 
 ## How to get help

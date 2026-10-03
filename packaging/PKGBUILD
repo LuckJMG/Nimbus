@@ -1,0 +1,46 @@
+# Maintainer: LuckJMG <25126199+LuckJMG@users.noreply.github.com>
+pkgname=nimbus
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='Keep a local folder in sync with any rclone remote'
+arch=('x86_64')
+url='https://github.com/LuckJMG/Nimbus'
+license=('MIT')
+# The tray links GTK 4, so the window cannot open without it. The daemon links
+# nothing but libc.
+depends=('gtk4')
+# rclone 1.71 promoted bisync from beta to stable, so an older rclone cannot
+# sync. Arch ships a new one, so this only names the version that works.
+optdepends=('rclone: runs the sync. rclone 1.71 or later is required.')
+# The release names its asset after the tag, and pkgver follows the Arch form,
+# so the asset name needs its own placeholder. The name after the two colons
+# lets a user fetch the asset, and it does nothing in the release workflow
+# because the workflow puts the file next to this PKGBUILD.
+_tagver=@TAGVER@
+_archive="nimbus-$_tagver-x86_64-unknown-linux-gnu.tar.gz"
+source=("$_archive::$url/releases/download/v$_tagver/$_archive")
+sha256sums=('@SHA256@')
+# The release workflow only has an x86_64 runner, so the package needs one.
+# The debug split holds nothing that a cargo release build did not already drop.
+options=('!lto' '!debug')
+
+package() {
+    # The release tarball holds its payload in one nimbus directory, and its
+    # name follows the tag while pkgver follows the Arch form. So the path to
+    # the payload never comes from either variable.
+    cd "$srcdir/nimbus"
+    install -Dm755 nimbusd "$pkgdir/usr/bin/nimbusd"
+    install -Dm755 nimbus "$pkgdir/usr/bin/nimbus"
+    install -Dm644 data/systemd/user/nimbusd.service "$pkgdir/usr/lib/systemd/user/nimbusd.service"
+    install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service "$pkgdir/usr/share/dbus-1/services/io.github.luckjmg.Nimbus.service"
+    install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop "$pkgdir/usr/share/applications/io.github.luckjmg.Nimbus.desktop"
+    # A package cannot write into the home directory of the user, so the
+    # autostart entry takes the system path. Every desktop reads /etc/xdg.
+    install -Dm644 data/autostart/io.github.luckjmg.Nimbus.desktop "$pkgdir/etc/xdg/autostart/io.github.luckjmg.Nimbus.desktop"
+    for name in idle syncing paused offline error; do
+        install -Dm644 "data/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg" \
+            "$pkgdir/usr/share/icons/hicolor/scalable/apps/nimbus-$name-symbolic.svg"
+    done
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

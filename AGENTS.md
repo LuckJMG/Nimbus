@@ -8,11 +8,15 @@ client talks to it over D-Bus.
 
 Three crates exist. The daemon and the tray both work against a live bus. The
 systemd unit, the desktop entry, the autostart entry, the D-Bus service file, and
-the icon exist under
-`data/`. The `justfile` holds every install recipe, and it is the only copy of the
-file list. `README.md` holds the user-facing tables: the config keys, the D-Bus
+the icons exist under `data/`. The `justfile` holds every install recipe, and it
+is the only copy of that file list. `packaging/` holds the three package
+definitions, and it is a second copy of the same file list, because a package
+tool needs the list in the form of its own metadata. `README.md` holds
+the user-facing tables: the config keys, the phases and their icons, the D-Bus
 API, the menu, and the troubleshooting steps. `docs/screenshot.png` shows the
-window. No CI runs.
+window. `docs/releases/` holds one release notes file per tag. The project is in
+beta at 0.1.0-beta. No CI runs the three checks, so run them yourself before
+every commit.
 
 | Crate | Role |
 | --- | --- |
@@ -512,10 +516,98 @@ The heading of the window takes `status_name`, which is the short name. The line
 below it takes the error from `state.last_error`. The tooltip takes `status_text`,
 which is the full text. Only the tooltip has the room for the message.
 
+## Packaging and releases
+
+`.github/workflows/release.yml` runs on a tag push of `v*`. It is the only
+workflow in the tree, and it does not run the three checks. A tag that
+disagrees with the `version` in `Cargo.toml` stops the build, because a wrong
+tag puts wrong metadata in the name of every package.
+
+The workflow runs one cargo build and three package builds. The build job
+writes one tarball, `nimbus-<version>-x86_64-unknown-linux-gnu.tar.gz`, which
+holds the two binaries, the `data/` tree, the license, and the readme. Each
+package job runs in the container of its own distribution, so the package tool
+and the file layout are the ones of that distribution. The release job attaches
+the tarball and the three packages.
+
+The payload sits in one `nimbus` directory inside the tarball, and no version
+names it. That is what lets each package tool reach it from its own name for
+the version. The deb and the rpm take the payload with `--strip-components=1`,
+and `makepkg` reaches it through `$srcdir/nimbus`.
+
+The version changes form for each tool, so the workflow derives it from the tag
+in one line each:
+
+| Format | Derivation | Result for `v0.1.0-beta` |
+| --- | --- | --- |
+| Debian | `version` with the first `-` as `~`, then `-1` | `0.1.0~beta-1` |
+| Fedora | `version` with the first `-` as `~` | `0.1.0~beta` |
+| Arch | `version` with every `-` as `.` | `0.1.0.beta` |
+
+A tilde sorts before the final release, and a dot sorts before it under
+`vercmp`, so a beta never replaces a final release in a package manager. A tag
+with no hyphen needs no change, because each form then matches the tag.
+
+Each file under `packaging/` carries a placeholder, and the workflow fills it
+from the tag: `@VERSION@` in `deb/control` and `nimbus.spec`, and `@PKGVER@`,
+`@TAGVER@`, and `@SHA256@` in `PKGBUILD`. The placeholders are the only reason
+a release needs no edit to a packaging file. Do not put a literal version in
+one of these files.
+
+The three package layouts are the layout of `just install`, with two changes.
+The autostart entry goes to `/etc/xdg/autostart`, because a package cannot
+write into the home directory of the user, and every desktop reads that path.
+The license and the readme go to `/usr/share`. Every other path is the path that
+the recipe uses, and the files come from `data/` unchanged.
+
+No package enables the daemon unit, so the user runs
+`systemctl --user enable --now nimbusd.service` once. An install runs as root
+with no session bus, so `systemctl --user enable` fails there. A `--no-reload`
+flag does not help, because the connect to the bus happens before it, which a
+live run confirmed. The README and the release notes name the command.
+
+Three traps in the package jobs, all hit and all fixed. Read these before
+touching the workflow.
+
+- `makepkg` refuses to run as root, and a container job runs as root. The Arch
+  job makes a user and builds in the home directory of that user. It also needs
+  `fakeroot` and `debugedit` installed, and the image package database needs a
+  full sync with `pacman -Syy` before it finds them. `debugedit` is its own
+  package in `core`, not a part of `elfutils`.
+- `makepkg` names its source file after `pkgver`, and the release names its
+  asset after the tag. The two names differ, because the Arch form of a
+  pre-release uses a dot. The PKGBUILD therefore holds `@TAGVER@` next to
+  `pkgver`, and it names the source with the `name::url` form. The workflow
+  writes the tag form and the workflow puts the tarball next to the PKGBUILD,
+  so makepkg reads the file and never fetches the URL.
+- `actions/checkout` needs `git`, and none of the three base images has it. Each
+  package job installs it.
+- `${version/-/~}` reads the tilde as the home directory of the user on bash
+  5.2, which is the bash of the Debian and the Arch image. It returns
+  `0.1.0/rootbeta`, and the extra slash then breaks the `sed` that writes the
+  version into the packaging file. The tilde needs a backslash, so the line is
+  `${version/-/\~}`. A container job runs as root, so the home directory is
+  `/root`.
+
+The arch package needs no build dependency check, because the binaries come from
+the build job. `makepkg --nodeps` skips that check. The Arch package also sets
+`!debug`, because a debug split of a cargo release build holds nothing.
+
+The packages are x86_64 only, because the workflow has one runner
+architecture. The rpm says so with `ExclusiveArch`, and the deb says so with
+`Architecture`.
+
+`docs/releases/<tag>.md` holds the release notes for that tag, and the release
+job reads it as the body of the release. A release needs that file, and `gh`
+fails without it, so a missing file stops the release instead of publishing an
+empty body. The notes follow the Good Docs template and ASD-STE100 simple
+English.
+
 ## Installing
 
 The files in `data/` are the package payload. The `justfile` holds the recipe,
-and it is the only copy:
+and it is the only copy of that list. The files under `packaging/` are a second
+copy, one per package tool:
 
 ```console
 just install            # into /usr, needs root

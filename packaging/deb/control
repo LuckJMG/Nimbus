@@ -1,0 +1,16 @@
+Package: nimbus
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: LuckJMG <25126199+LuckJMG@users.noreply.github.com>
+Depends: libgtk-4-1 (>= 4.10), systemd
+Recommends: rclone (>= 1.71)
+Description: Keep a local folder in sync with any rclone remote
+ Nimbus wraps rclone bisync. A daemon runs the sync on a schedule and after
+ each file change, and a tray icon shows the state and takes your commands.
+ .
+ The daemon repairs the record that rclone left behind, so a lost connection
+ needs no action from you. Only a record that no spare can restore needs a
+ resync, and the daemon asks before it starts one.
+ Homepage: https://github.com/LuckJMG/Nimbus
