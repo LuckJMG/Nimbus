@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use nimbus_ipc::{Settings, State};
 
-use crate::config;
 use crate::engine::{Engine, Event};
 
 /// The D-Bus surface of the daemon. The service reads the state and sends
@@ -33,7 +32,11 @@ impl NimbusService {
     }
 
     fn get_settings(&self) -> Settings {
-        config::settings_of(self.engine.lock().expect("the engine lock").config())
+        self.engine
+            .lock()
+            .expect("the engine lock")
+            .config()
+            .settings()
     }
 
     fn resync(&self) -> zbus::fdo::Result<()> {
@@ -52,8 +55,7 @@ impl NimbusService {
             .expect("the engine lock")
             .config()
             .clone();
-        config::apply_settings(&mut candidate, &settings);
-        if let Err(err) = candidate.check() {
+        if let Err(err) = candidate.apply(&settings).and_then(|_| candidate.check()) {
             return Err(zbus::fdo::Error::InvalidArgs(format!("{err}")));
         }
         self.send(Event::SetSettings(settings))

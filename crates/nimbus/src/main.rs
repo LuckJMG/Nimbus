@@ -5,7 +5,6 @@ mod window;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -44,8 +43,8 @@ const TICK: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> ExitCode {
-    // The autostart entry passes --hidden, so a login starts the tray and no
-    // window. GApplication refuses an option that it does not know, so the tray
+    // The autostart entry in data/autostart passes --hidden, so a login starts
+    // the tray and no window. GApplication refuses an option that it does not know, so the tray
     // reads the flag here and passes no arguments on.
     let hidden = std::env::args().skip(1).any(|arg| arg == "--hidden");
     match start(hidden) {
@@ -88,66 +87,42 @@ fn start(hidden: bool) -> Result<gtk::Application> {
         .flags(gtk::gio::ApplicationFlags::empty())
         .build();
 
-    let ui = Rc::new(Ui {
-        view: Arc::clone(&view),
-        action_tx: action_tx.clone(),
-        hold: RefCell::new(None),
-        window: RefCell::new(None),
-        dialog: RefCell::new(None),
-        // The activate callback runs more than once, so it cannot move these
-        // out on the first call. The first call takes them.
-        start: RefCell::new(Some(Start {
+    // The activate callback runs more than once, so it cannot move these out
+    // on the first call. The first call takes them.
+    let pending = RefCell::new(Some((
+        Start {
             proxy,
             actions: action_rx,
             menu: action_tx,
             show: reply_tx,
-            requests: reply_rx,
-        })),
-        started: AtomicBool::new(false),
-    });
+        },
+        reply_rx,
+    )));
+    let live: RefCell<Option<Live>> = RefCell::new(None);
 
     app.connect_activate(move |app| {
-        if ui.started.swap(true, Ordering::SeqCst) {
+        if let Some(live) = live.borrow().as_ref() {
             // A second process handed its activation to this one, so only the
             // window has to come forward.
-            if let Some(window) = ui.window.borrow().as_ref() {
-                window.root.present();
-            }
+            live.window.root.present();
             return;
         }
-        // The tray keeps the process alive with no window, so this hold has to
-        // outlive the call. It lives in the captured state.
-        *ui.hold.borrow_mut() = Some(app.hold());
-
-        let window = Rc::new(window::build(app, ui.action_tx.clone()));
-        *ui.window.borrow_mut() = Some(Rc::clone(&window));
-        // The dialog is built once and never shown here, because it opens only
-        // from the menu. A window with no values would show empty fields.
-        let dialog = Rc::new(settings::build(app, ui.action_tx.clone()));
-        *ui.dialog.borrow_mut() = Some(Rc::clone(&dialog));
-
-        let start = ui
-            .start
+        let (start, requests) = pending
             .borrow_mut()
             .take()
             .expect("the first activation starts the worker");
-        refresh_loop(&ui, &window, &dialog, start.requests);
+        let opened = first_activation(app, &view, &start.menu, requests);
         // A later activation comes from a second process, for example a start
         // from the app menu, so it presents the window whatever this flag says.
         if !hidden {
-            window.root.present();
+            opened.window.root.present();
         }
+        *live.borrow_mut() = Some(opened);
 
-        let worker = Worker {
-            view: Arc::clone(&view),
-            proxy: start.proxy,
-            actions: start.actions,
-            menu: start.menu,
-            show: start.show,
-        };
+        let view = Arc::clone(&view);
         if let Err(err) = thread::Builder::new()
             .name("nimbus-tray".into())
-            .spawn(move || worker.run())
+            .spawn(move || run_worker(view, start))
         {
             eprintln!("nimbus: the tray cannot start the worker thread: {err}");
         }
@@ -163,22 +138,54 @@ struct Start {
     actions: Receiver<Action>,
     menu: Sender<Action>,
     show: Sender<Reply>,
-    requests: Receiver<Reply>,
 }
 
-/// The state the activate callback needs on the main thread.
-struct Ui {
-    view: Arc<Mutex<View>>,
-    /// Cloned into both windows, which send the button presses.
-    action_tx: Sender<Action>,
-    /// Dropping the guard would release the hold, so the guard stays here.
-    hold: RefCell<Option<gtk::gio::ApplicationHoldGuard>>,
-    window: RefCell<Option<Rc<window::App>>>,
-    /// The dialog is built beside the status window and then reused, because a
-    /// rebuild would throw away a half-typed value.
-    dialog: RefCell<Option<Rc<settings::App>>>,
-    start: RefCell<Option<Start>>,
-    started: AtomicBool,
+/// What the first activation keeps on the main thread.
+struct Live {
+    /// The tray keeps the process alive with no window. Dropping the guard
+    /// would release the hold, so the guard stays here.
+    _hold: gtk::gio::ApplicationHoldGuard,
+    window: Rc<window::StatusWindow>,
+}
+
+/// Builds both windows and starts the timer that feeds them.
+///
+/// The dialog is built once and never shown here, because it opens only from
+/// the menu. It is reused after that, because a rebuild would throw away a
+/// half-typed value.
+fn first_activation(
+    app: &gtk::Application,
+    view: &Arc<Mutex<View>>,
+    actions: &Sender<Action>,
+    requests: Receiver<Reply>,
+) -> Live {
+    let hold = app.hold();
+    let window = Rc::new(window::build(app, actions.clone()));
+    let dialog = settings::build(app, actions.clone());
+    install_css(&WidgetExt::display(&window.root));
+    refresh_loop(view, &window, dialog, requests);
+    Live {
+        _hold: hold,
+        window,
+    }
+}
+
+/// Installs the theme fixes for both windows. A GTK 4 style provider covers
+/// the whole display, so the rules sit beside the two `build` calls.
+///
+/// - Breeze rounds the bottom corners of the body, but the frame around it
+///   stays square, so the desktop shows through two small gaps.
+/// - Adwaita dims a placeholder, but Breeze draws it in the full text color,
+///   so an example reads as the current value. The rule fades the theme color
+///   instead of setting one.
+fn install_css(display: &gtk::gdk::Display) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data("window { border-radius: 0; } placeholder { opacity: 0.5; }");
+    gtk::style_context_add_provider_for_display(
+        display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 /// The one main loop timer. It moves the windows when the worker asks, and it
@@ -187,104 +194,80 @@ struct Ui {
 /// One timer serves both windows, because a second timer would need a second
 /// glib source and both read the same channels.
 fn refresh_loop(
-    ui: &Rc<Ui>,
-    app: &Rc<window::App>,
-    dialog: &Rc<settings::App>,
+    view: &Arc<Mutex<View>>,
+    window: &Rc<window::StatusWindow>,
+    dialog: settings::SettingsDialog,
     requests: Receiver<Reply>,
 ) {
     // A window outlives the timer only if the host keeps it. A weak reference
     // lets the timer find out instead of assuming.
-    let weak: WeakRef<gtk::Window> = WeakRef::new();
-    weak.set(Some(&app.root));
-    // The dialog needs its own handle for the fields, so the timer keeps a
-    // strong reference. A weak one would leave nothing to write the keys into.
-    let editor = Rc::clone(dialog);
-    let view = Arc::clone(&ui.view);
-    let shown = Rc::clone(app);
+    let weak_root: WeakRef<gtk::Window> = WeakRef::new();
+    weak_root.set(Some(&window.root));
+    let view = Arc::clone(view);
+    let window = Rc::clone(window);
     let mut last: Option<View> = None;
     gtk::glib::timeout_add_local(TICK, move || {
         while let Ok(reply) = requests.try_recv() {
-            deliver(reply, &weak, &editor);
+            deliver(reply, &weak_root, &dialog);
         }
         let current = view.lock().expect("the view lock").clone();
         if last.as_ref() != Some(&current) {
-            shown.apply(&current, unix_now());
+            window.apply(&current, unix_now());
             last = Some(current);
         }
         ControlFlow::Continue
     });
 }
 
-/// Carries out one reply from the worker.
-///
-/// A refusal shows the dialog, because the text belongs there. The dialog comes
-/// forward with the message, because a hidden dialog cannot show it.
-fn deliver(reply: Reply, window: &WeakRef<gtk::Window>, dialog: &settings::App) {
+/// Carries out one reply from the worker. Every reply except `Show` belongs
+/// to the dialog.
+fn deliver(reply: Reply, window: &WeakRef<gtk::Window>, dialog: &settings::SettingsDialog) {
     match reply {
         Reply::Show => {
             if let Some(root) = window.upgrade() {
                 root.present();
             }
         }
-        Reply::Settings(keys) => {
-            dialog.apply(&keys);
-            dialog.root.present();
-        }
-        Reply::Saved => dialog.close(),
-        Reply::Refused(text) => {
-            dialog.refuse(&text);
-            dialog.root.present();
-        }
+        other => dialog.receive(other),
     }
 }
 
-/// Everything the tray needs, on a thread that is not the GTK main loop.
-struct Worker {
-    view: Arc<Mutex<View>>,
-    proxy: NimbusProxyBlocking<'static>,
-    actions: Receiver<Action>,
-    menu: Sender<Action>,
-    show: Sender<Reply>,
-}
-
-impl Worker {
-    fn run(self) {
-        let Worker {
-            view,
-            proxy,
-            actions,
-            menu,
-            show,
-        } = self;
-        let tray = NimbusTray::new(Arc::clone(&view), tray::icon_dir(), menu);
-        // A desktop with no SNI host must not end the process. The icon appears
-        // when a host arrives later.
-        let Ok(handle) = tray.assume_sni_available(true).spawn() else {
-            eprintln!("nimbus: the tray cannot register with the desktop");
-            return;
+/// Runs the tray on a thread that is not the GTK main loop.
+fn run_worker(view: Arc<Mutex<View>>, start: Start) {
+    let Start {
+        proxy,
+        actions,
+        menu,
+        show,
+    } = start;
+    let tray = NimbusTray::new(Arc::clone(&view), tray::icon_dir(), menu);
+    // A desktop with no SNI host must not end the process. The icon appears
+    // when a host arrives later.
+    let Ok(handle) = tray.assume_sni_available(true).spawn() else {
+        eprintln!("nimbus: the tray cannot register with the desktop");
+        return;
+    };
+    loop {
+        // A menu click wakes the loop at once, and the timeout is the poll
+        // period. Sleeping instead would make every click wait up to two
+        // seconds before the daemon hears it. The blocking call takes the
+        // first click out of the channel, so it goes into the batch too.
+        let mut batch = Vec::new();
+        if let Ok(action) = actions.recv_timeout(POLL) {
+            batch.push(action);
+        }
+        batch.extend(actions.try_iter());
+        for action in batch {
+            perform(action, &proxy, &view, &show);
+        }
+        let next = match proxy.state() {
+            Ok(state) => View::Ready(state),
+            Err(_) => View::Offline(offline_reason()),
         };
-        loop {
-            // A menu click wakes the loop at once, and the timeout is the poll
-            // period. Sleeping instead would make every click wait up to two
-            // seconds before the daemon hears it. The blocking call takes the
-            // first click out of the channel, so it goes into the batch too.
-            let mut batch = Vec::new();
-            if let Ok(action) = actions.recv_timeout(POLL) {
-                batch.push(action);
-            }
-            batch.extend(actions.try_iter());
-            for action in batch {
-                send(action, &proxy, &view, &show);
-            }
-            let next = match proxy.state() {
-                Ok(state) => View::Ready(state),
-                Err(_) => View::Offline(offline_reason()),
-            };
-            if tray::refresh(&handle, &view, next) {
-                // The panel dropped the item. The window keeps working, so the
-                // process stays up and a panel reload brings the icon back.
-                eprintln!("nimbus: the desktop closed the tray item");
-            }
+        if tray::refresh(&handle, &view, next) {
+            // The panel dropped the item. The window keeps working, so the
+            // process stays up and a panel reload brings the icon back.
+            eprintln!("nimbus: the desktop closed the tray item");
         }
     }
 }
@@ -294,13 +277,11 @@ impl Worker {
 /// cause. The daemon writes a default config on its first start, and the tray
 /// never writes the file, so a missing file means the daemon never ran.
 fn offline_reason() -> String {
-    let checked = if nimbusd::config::default_file().exists() {
-        nimbusd::config::load().and_then(|cfg| Ok(cfg.check()?))
-    } else {
-        Ok(())
-    };
-    match checked {
-        Ok(()) => String::new(),
+    match nimbusd::config::read() {
+        Ok(Some(cfg)) => cfg
+            .check()
+            .map_or_else(|err| err.to_string(), |()| String::new()),
+        Ok(None) => String::new(),
         Err(err) => format!("{err:#}"),
     }
 }
@@ -308,7 +289,7 @@ fn offline_reason() -> String {
 /// Carries out one action. The worker resolves the pause toggle, so the click
 /// sites never need to know the current state. The windows belong to the main
 /// thread, so those requests go across as a message.
-fn send(
+fn perform(
     action: Action,
     proxy: &NimbusProxyBlocking<'_>,
     view: &Arc<Mutex<View>>,
@@ -367,13 +348,8 @@ fn open_settings(proxy: &NimbusProxyBlocking<'_>, show: &Sender<Reply>) {
 /// the dialog shows the defaults, and a save writes them over the file. The
 /// read does not create a missing file, so a missing file gives the defaults.
 fn read_settings() -> Reply {
-    let cfg = if nimbusd::config::default_file().exists() {
-        nimbusd::config::load()
-    } else {
-        Ok(nimbusd::config::Config::default())
-    };
-    match cfg {
-        Ok(cfg) => Reply::Settings(nimbusd::config::settings_of(&cfg)),
+    match nimbusd::config::read() {
+        Ok(cfg) => Reply::Settings(cfg.unwrap_or_default().settings()),
         Err(err) => Reply::Refused(format!("{err:#}")),
     }
 }
@@ -402,7 +378,7 @@ fn save_settings(
 /// into the dialog.
 fn write_settings(keys: &nimbus_ipc::Settings) -> Reply {
     let written = nimbusd::config::load().and_then(|mut cfg| {
-        nimbusd::config::apply_settings(&mut cfg, keys);
+        cfg.apply(keys)?;
         nimbusd::config::save(&cfg)
     });
     match written {

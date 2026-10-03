@@ -89,8 +89,6 @@ pub trait Nimbus {
     /// confirms the resync that the move needs.
     fn resync(&self) -> zbus::Result<()>;
 
-    // The interface has no SetMode method. The daemon runs rclone bisync.
-
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
 

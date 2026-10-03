@@ -61,10 +61,6 @@ pub fn is_paused(view: &View) -> bool {
     phase(view) == Some(Phase::Paused)
 }
 
-pub fn is_syncing(view: &View) -> bool {
-    phase(view) == Some(Phase::Syncing)
-}
-
 /// The full state text, for the tooltip. The tooltip has room for the error
 /// message from the daemon.
 pub fn status_text(view: &View) -> String {
@@ -122,8 +118,21 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_daemon_is_neither_paused_nor_syncing() {
-        assert!(!is_paused(&View::Offline(String::new())));
-        assert!(!is_syncing(&View::Offline(String::new())));
+    fn the_pause_state_comes_from_the_view() {
+        assert!(is_paused(&ready(Phase::Paused, "")));
+        assert!(!is_paused(&ready(Phase::Idle, "")));
+        assert!(
+            !is_paused(&View::Offline(String::new())),
+            "a missing daemon is not paused"
+        );
+    }
+
+    #[test]
+    fn the_short_name_hides_the_error_text() {
+        assert_eq!(status_name(&ready(Phase::Error, "Bisync aborted")), "Error");
+        assert_eq!(
+            status_text(&ready(Phase::Error, "Bisync aborted")),
+            "Bisync aborted"
+        );
     }
 }

@@ -7,7 +7,8 @@ client talks to it over D-Bus.
 ## State
 
 Three crates exist. The daemon and the tray both work against a live bus. The
-systemd unit, the desktop entry, the D-Bus service file, and the icon exist under
+systemd unit, the desktop entry, the autostart entry, the D-Bus service file, and
+the icon exist under
 `data/`. The `justfile` holds every install recipe, and it is the only copy of the
 file list. `README.md` holds the user-facing tables: the config keys, the D-Bus
 API, the menu, and the troubleshooting steps. `docs/screenshot.png` shows the
@@ -32,8 +33,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 131 tests pass today: 3 in `nimbus-ipc`, 84 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 127 tests pass today: 3 in `nimbus-ipc`, 85 in the `nimbusd`
+library, 1 in the `nimbusd` binary, and 38 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -249,7 +250,7 @@ and B.
 ## The resync gate
 
 A resync lets the local copy overwrite a remote copy that differs, so the
-daemon never starts one without a confirmation. `wants_run` refuses every run
+daemon never starts one without a confirmation. `start_run_if_due` refuses every run
 while `resync_pending` is set and `confirmed` is not, and it reports the phase
 `resync`. The phase is a string on the wire, so the signature stays `(sdts)`.
 
@@ -311,28 +312,31 @@ Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 - `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttssas)`, and
   `settings_signature_is_stable` holds it.
 - `Config` carries `deny_unknown_fields`, so a file from a build that read a
-  `path` key stops the daemon with the line to delete. Serde ignores an unknown
-  key by default, and a silent start would sync the whole remote to a user who
-  asked for one folder. `removed_key` is the literal that names the old key.
+  `path` key stops the daemon with an error that names the unknown field.
+  Serde ignores an unknown key by default, and a silent start would sync the
+  whole remote to a user who asked for one folder.
 - `Adjustment::new` takes six arguments in GTK 4, with `page_size` last. The
   spin button carries the range, so the dialog cannot send a value the daemon
   refuses.
 
 A moved `remote` or `local` has no bisync listing, because rclone names its
-listing after the pair of paths. So `apply_settings` raises `resync_pending`
+listing after the pair of paths. So `Config::apply` raises `resync_pending`
 and returns true, which costs one full pass. The engine takes that return
 value to set the reason for the resync. The comparison is on the folder that rclone opens,
 because a text change that keeps the folder must not cost a resync.
 
 A refusal arrives as a `zbus::Error::MethodError` named `InvalidArgs`, and its
-`detail` holds the words from `check()`. The bus also answers a call to a
+`detail` holds the words from `apply` or `check`. The bus also answers a call to a
 missing daemon with a method error, `ServiceUnknown` with "The name is not
 activatable", so `refuse` matches the name, not only the variant. Every other
 error leaves the line empty, because the status window already says why the
 daemon is not running.
 
-`check` returns `Invalid`, which names the refused key. The dialog runs the
-same check on the typed keys before Save sends them, and `Hints` shows the
+`apply` and `check` return `Invalid`, which names the refused `Key`. The
+wire carries the conflict values as text, so `apply` refuses an unknown one
+before any key changes. `ConflictResolve` and `ConflictLoser` spell each value
+once, in `as_str`, and serde reads and writes the file through it. The dialog
+runs the same two on the typed keys before Save sends them, and `Hints` shows the
 reason under the field that holds the key. The daemon checks again, because
 the dialog is not the only client. A refusal that belongs to no field, such as
 a daemon that does not run, goes to the line above the buttons.
@@ -387,7 +391,7 @@ Six traps, all hit and all fixed. Read these before touching `main.rs`.
 - `handle.update()` reads the view on a thread of the tray service. It must stay **outside** the view lock. Inside it, the update waits for the lock that the update itself holds, and the first menu click hangs.
 - An `activate` callback runs on a thread of the tray service. It must not block. It only sends on a channel.
 - `glib::MainContext::channel` does not exist in glib 0.22. The window is woken by one `glib::timeout_add_local` timer, which also refreshes the labels.
-- `glib::WeakRef::new()` takes no argument in glib 0.22, so the binding needs a type annotation. It returns an **empty** reference, and `upgrade` returns `None` until `set` names an object. A tray click reached the window through this reference, so every click after the first did nothing. The comments on `refresh_loop` and on `App::root` described the intent, and the code did not follow.
+- `glib::WeakRef::new()` takes no argument in glib 0.22, so the binding needs a type annotation. It returns an **empty** reference, and `upgrade` returns `None` until `set` names an object. A tray click reached the window through this reference, so every click after the first did nothing. The comments on `refresh_loop` and on `StatusWindow::root` described the intent, and the code did not follow.
 - `gtk_button_get_child` returns the label, not an internal box, on GTK 4.22. The recipe that prepends an icon into the child box adds nothing, and the button shows a text and nothing else. A live run on GTK 4.22.5 showed two plain buttons. `action_button` builds the box instead, so the icons follow the icon theme of the desktop.
 
 ## The window
@@ -403,8 +407,10 @@ not set a fixed color.
 
 The dialog entries carry example placeholders. Breeze for GTK draws a
 placeholder in the full text color, so an example read as the current value
-in a live run. One CSS rule in `settings.rs` sets the placeholder opacity to
-0.5, which fades the theme color instead of replacing it.
+in a live run. One CSS rule sets the placeholder opacity to 0.5, which fades
+the theme color instead of replacing it. A GTK 4 style provider covers the
+whole display, so `install_css` in `main.rs` installs this rule and the square
+corners for both windows, next to the two `build` calls.
 
 The two buttons take their icons from the icon theme, so the names in
 `window.rs` must exist in it. The check that matters is a live run on the
@@ -469,9 +475,9 @@ first route, which is why its tray icon raises the window and an Electron one do
 not.
 
 `connect_activate` takes an `Fn`, not an `FnOnce`. The first call moves the worker
-into a thread, so the worker parts sit in a `RefCell` inside the captured state and
-the first call takes them. An `AtomicBool` keeps the first call from starting a
-second worker.
+into a thread, so the worker parts sit in a `RefCell` inside the closure and the
+first call takes them. The first call also stores the windows in a second
+`RefCell`. A later call finds them there, so it starts no second worker.
 
 `gtk::Application` needs a `.service` file to be activatable. Without one, a call to
 `org.freedesktop.Application.Activate` fails with "The name ... was not provided by
@@ -527,7 +533,7 @@ the service file rewritten instead.
 
 Two start methods, one for each program. The daemon runs as a systemd user unit,
 because it needs no display and because a restart policy matters. The tray starts
-from the autostart entry, because the login session owns `WAYLAND_DISPLAY` and a
+from `data/autostart`, because the login session owns `WAYLAND_DISPLAY` and a
 systemd user unit does not. A unit for the tray with
 `WantedBy=graphical-session.target` would never start on GNOME, and that target
 does not exist there.
@@ -579,7 +585,7 @@ second sentence names the fix only when the fix is not obvious from the error.
 
 The name check needs care. `request_name_with_flags` returns
 `zbus::Error::NameTaken` for a taken name, not a reply, so the reply check that
-follows it never runs. `name_is_taken` matches the error, and the reply check
+follows it never runs. `claim_bus_name` matches that error, and the reply check
 stays as a second line of defence.
 
 ## Design limits, not bugs
@@ -592,7 +598,7 @@ stays as a second line of defence.
 - The `sync` mode was removed on purpose. `rclone sync` deletes remote files that are missing locally, and `bisync` reports conflicts instead.
 - The tray reads the state every 2 seconds instead of listening for `Changed`. A failed read is how the tray learns that the daemon stopped, because a dropped signal looks the same as an idle daemon.
 - The settings dialog stops the two timers at 86400 seconds, one day. The config file has no upper bound, so a value above that needs the file. A lower bound of one exists because `check` refuses zero.
-- The daemon moves its file watcher when `local` moves, because the kernel holds the watch and the config does not. The move sits behind a comparison on the expanded path, so a settings save that left `local` alone rebuilds nothing. `follow` in `nimbusd/src/main.rs` is that comparison, and a test holds both sides.
+- The daemon moves its file watcher when `local` moves, because the kernel holds the watch and the config does not. The move sits behind a comparison on the expanded path, so a settings save that left `local` alone rebuilds nothing. The comparison is the `watch` field of `Turn` in `nimbusd/src/main.rs`.
 - The panel can drop the tray item, for example on a panel reload. The tray logs the event and stays up, because the window still works. A panel reload brings the icon back.
 - A tray click raises the window only while it is hidden. A visible window keeps its place, and a minimized one stays minimized. The compositor decides this, and it needs an `xdg_activation_token_v1`. The details are in "The tray raise" below.
 

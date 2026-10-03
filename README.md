@@ -346,8 +346,8 @@ daemon in the window.
 | The folder … does not exist. | Create the folder. Or, in the Settings dialog, set Local folder to a folder that exists. |
 | The remote is empty. Set it to an rclone remote name, for example drive. | In the Settings dialog, set Remote path to the name of a remote from `rclone config`. |
 | `interval_secs` must be above zero. | Set the interval to 1 or more. The same solution applies to `debounce_secs`. |
-| `conflict_resolve` must be one of … | Set the key to one of the values that the message names. The same solution applies to `conflict_loser`. |
-| The config key path is obsolete. Delete it. | Click Open config file in the Settings dialog, and then delete the `path` line. |
+| Invalid config: `conflict_resolve` must be one of … | Set the key to one of the values that the message names. The same solution applies to `conflict_loser`. |
+| Invalid config: unknown field `path` … | An older build wrote this key. Click Open config file in the Settings dialog, and then delete the `path` line. |
 | Invalid config: … | The config file is not valid TOML, or a key has a wrong type. Click Open config file, and then fix the line that the message names. |
 | nimbusd: another daemon already holds io.github.luckjmg.nimbus | This line is in the daemon log. Two daemons run, and only one can own the name. Stop the other daemon, and then start this one again. |
 

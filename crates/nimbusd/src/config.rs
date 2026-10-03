@@ -27,23 +27,113 @@ impl LocalDir {
     }
 }
 
-/// The values that rclone takes for `--conflict-resolve`. `none` keeps both
-/// copies, and the other values name the copy that wins.
-pub const CONFLICT_RESOLVE: [&str; 7] = [
-    "none", "newer", "older", "larger", "smaller", "path1", "path2",
-];
-
-/// The values that rclone takes for `--conflict-loser`. A live run on rclone
-/// 1.74.3 measured `delete`: it removes the losing copy for good, and with
-/// `none` there is no loser, so rclone keeps both copies.
-pub const CONFLICT_LOSER: [&str; 3] = ["num", "pathname", "delete"];
-
-fn newer() -> String {
-    String::from("newer")
+/// The value for `--conflict-resolve`. `None` keeps both copies, and the other
+/// values name the copy that wins. `as_str` is the only spelling, and serde
+/// reads and writes through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
+pub enum ConflictResolve {
+    None,
+    #[default]
+    Newer,
+    Older,
+    Larger,
+    Smaller,
+    Path1,
+    Path2,
 }
 
-fn delete() -> String {
-    String::from("delete")
+impl ConflictResolve {
+    pub const ALL: [Self; 7] = [
+        Self::None,
+        Self::Newer,
+        Self::Older,
+        Self::Larger,
+        Self::Smaller,
+        Self::Path1,
+        Self::Path2,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Newer => "newer",
+            Self::Older => "older",
+            Self::Larger => "larger",
+            Self::Smaller => "smaller",
+            Self::Path1 => "path1",
+            Self::Path2 => "path2",
+        }
+    }
+}
+
+impl From<ConflictResolve> for &'static str {
+    fn from(value: ConflictResolve) -> Self {
+        value.as_str()
+    }
+}
+
+impl TryFrom<String> for ConflictResolve {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        choose(&Self::ALL, Self::as_str, "conflict_resolve", &text)
+    }
+}
+
+/// The value for `--conflict-loser`. A live run on rclone 1.74.3 measured
+/// `Delete`: it removes the losing copy for good. With `ConflictResolve::None`
+/// there is no loser, so rclone keeps both copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
+pub enum ConflictLoser {
+    Num,
+    Pathname,
+    #[default]
+    Delete,
+}
+
+impl ConflictLoser {
+    pub const ALL: [Self; 3] = [Self::Num, Self::Pathname, Self::Delete];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Num => "num",
+            Self::Pathname => "pathname",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+impl From<ConflictLoser> for &'static str {
+    fn from(value: ConflictLoser) -> Self {
+        value.as_str()
+    }
+}
+
+impl TryFrom<String> for ConflictLoser {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        choose(&Self::ALL, Self::as_str, "conflict_loser", &text)
+    }
+}
+
+/// Finds the value whose spelling is `text`. The error names the key and
+/// every spelling that the key takes.
+fn choose<T: Copy>(
+    all: &[T],
+    spell: fn(T) -> &'static str,
+    key: &str,
+    text: &str,
+) -> Result<T, String> {
+    all.iter()
+        .copied()
+        .find(|value| spell(*value) == text)
+        .ok_or_else(|| {
+            let spellings: Vec<&str> = all.iter().map(|value| spell(*value)).collect();
+            format!("{key} must be one of {}.", spellings.join(", "))
+        })
 }
 
 /// The daemon reads this file at start.
@@ -70,12 +160,12 @@ pub struct Config {
     pub resync_pending: bool,
     /// The copy that wins when a file changed on both sides. A file without
     /// the key loads `newer`.
-    #[serde(default = "newer")]
-    pub conflict_resolve: String,
+    #[serde(default)]
+    pub conflict_resolve: ConflictResolve,
     /// What happens to the copy that lost. A file without the key loads
     /// `delete`.
-    #[serde(default = "delete")]
-    pub conflict_loser: String,
+    #[serde(default)]
+    pub conflict_loser: ConflictLoser,
     /// More rclone flags for every run, for example `--drive-skip-shortcuts`.
     /// A file without the key loads an empty list.
     #[serde(default)]
@@ -91,25 +181,33 @@ impl Default for Config {
             interval_secs: 900,
             debounce_secs: 30,
             resync_pending: true,
-            conflict_resolve: newer(),
-            conflict_loser: delete(),
+            conflict_resolve: ConflictResolve::default(),
+            conflict_loser: ConflictLoser::default(),
             extra_flags: Vec::new(),
         }
     }
 }
 
-impl Config {
-    pub fn remote_path(&self) -> String {
-        target(&self.remote)
-    }
+/// A key that the daemon can refuse. The settings dialog shows the reason
+/// under the field that holds the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Remote,
+    Local,
+    IntervalSecs,
+    DebounceSecs,
+    ConflictResolve,
+    ConflictLoser,
+}
 
+impl Config {
     /// Rejects settings that the daemon cannot use. The function returns the
     /// first error.
     pub fn check(&self) -> Result<(), Invalid> {
         let refuse = |key, reason: String| Err(Invalid { key, reason });
         if self.remote.is_empty() {
             return refuse(
-                "remote",
+                Key::Remote,
                 String::from(
                     "The remote is empty. Set it to an rclone remote name, for example drive.",
                 ),
@@ -117,50 +215,81 @@ impl Config {
         }
         if self.interval_secs == 0 {
             return refuse(
-                "interval_secs",
+                Key::IntervalSecs,
                 String::from("interval_secs must be above zero."),
             );
         }
         if self.debounce_secs == 0 {
             return refuse(
-                "debounce_secs",
+                Key::DebounceSecs,
                 String::from("debounce_secs must be above zero."),
-            );
-        }
-        if !CONFLICT_RESOLVE.contains(&self.conflict_resolve.as_str()) {
-            return refuse(
-                "conflict_resolve",
-                format!(
-                    "conflict_resolve must be one of {}.",
-                    CONFLICT_RESOLVE.join(", ")
-                ),
-            );
-        }
-        if !CONFLICT_LOSER.contains(&self.conflict_loser.as_str()) {
-            return refuse(
-                "conflict_loser",
-                format!(
-                    "conflict_loser must be one of {}.",
-                    CONFLICT_LOSER.join(", ")
-                ),
             );
         }
         let local = self.local.path();
         if !local.is_dir() {
             return refuse(
-                "local",
+                Key::Local,
                 format!("The folder {} does not exist.", local.display()),
             );
         }
         Ok(())
     }
+
+    /// Reads the keys that a client may change.
+    pub fn settings(&self) -> Settings {
+        Settings {
+            remote: self.remote.clone(),
+            local: self.local.text(),
+            interval_secs: self.interval_secs,
+            debounce_secs: self.debounce_secs,
+            conflict_resolve: String::from(self.conflict_resolve.as_str()),
+            conflict_loser: String::from(self.conflict_loser.as_str()),
+            extra_flags: self.extra_flags.clone(),
+        }
+    }
+
+    /// Copies the keys from a client into the config.
+    ///
+    /// The wire carries the conflict values as text, so an unknown value is
+    /// refused before any key changes. The pause and the resync flag stay,
+    /// because the daemon needs both for its own bookkeeping. rclone names its
+    /// listing after the pair of paths, so a moved remote or folder has no
+    /// listing and the flag must go up. The comparison uses the folder that
+    /// rclone opens, because a text change that keeps the folder must not cost
+    /// a resync.
+    /// Returns true when the remote or the folder moved.
+    pub fn apply(&mut self, settings: &Settings) -> Result<bool, Invalid> {
+        let conflict_resolve = ConflictResolve::try_from(settings.conflict_resolve.clone())
+            .map_err(|reason| Invalid {
+                key: Key::ConflictResolve,
+                reason,
+            })?;
+        let conflict_loser =
+            ConflictLoser::try_from(settings.conflict_loser.clone()).map_err(|reason| Invalid {
+                key: Key::ConflictLoser,
+                reason,
+            })?;
+        let local = LocalDir::new(Path::new(&settings.local));
+        let moved =
+            target(&self.remote) != target(&settings.remote) || self.local.path() != local.path();
+        if moved {
+            self.resync_pending = true;
+        }
+        self.remote = settings.remote.clone();
+        self.local = local;
+        self.interval_secs = settings.interval_secs;
+        self.debounce_secs = settings.debounce_secs;
+        self.conflict_resolve = conflict_resolve;
+        self.conflict_loser = conflict_loser;
+        self.extra_flags = settings.extra_flags.clone();
+        Ok(moved)
+    }
 }
 
-/// A key that `check` refuses. The key lets the settings dialog show the
-/// reason under the field that holds the key.
+/// A key that the daemon refuses, with the reason for the user.
 #[derive(Debug)]
 pub struct Invalid {
-    pub key: &'static str,
+    pub key: Key,
     pub reason: String,
 }
 
@@ -172,19 +301,6 @@ impl std::fmt::Display for Invalid {
 
 impl std::error::Error for Invalid {}
 
-/// Reads the keys that a client may change out of the config.
-pub fn settings_of(cfg: &Config) -> Settings {
-    Settings {
-        remote: cfg.remote.clone(),
-        local: cfg.local.text(),
-        interval_secs: cfg.interval_secs,
-        debounce_secs: cfg.debounce_secs,
-        conflict_resolve: cfg.conflict_resolve.clone(),
-        conflict_loser: cfg.conflict_loser.clone(),
-        extra_flags: cfg.extra_flags.clone(),
-    }
-}
-
 /// Builds the rclone target for a remote text. A bare name targets the root
 /// of the remote, written `name:/`. A text with a colon already names a
 /// folder, as in `gdrive:/Photos`, so it passes unchanged. The text is not
@@ -195,30 +311,6 @@ pub fn target(remote: &str) -> String {
     } else {
         format!("{remote}:/")
     }
-}
-
-/// Copies the keys from a client into the config.
-///
-/// The pause and the resync flag stay, because the daemon needs both for its
-/// own bookkeeping. rclone names its listing after the pair of paths, so a
-/// moved remote or folder has no listing and the flag must go up. The
-/// comparison uses the folder that rclone opens, because a text change that
-/// keeps the folder must not cost a resync.
-/// Returns true when the remote or the folder moved.
-pub fn apply_settings(cfg: &mut Config, s: &Settings) -> bool {
-    let local = LocalDir::new(Path::new(&s.local));
-    let moved = target(&cfg.remote) != target(&s.remote) || cfg.local.path() != local.path();
-    if moved {
-        cfg.resync_pending = true;
-    }
-    cfg.remote = s.remote.clone();
-    cfg.local = local;
-    cfg.interval_secs = s.interval_secs;
-    cfg.debounce_secs = s.debounce_secs;
-    cfg.conflict_resolve = s.conflict_resolve.clone();
-    cfg.conflict_loser = s.conflict_loser.clone();
-    cfg.extra_flags = s.extra_flags.clone();
-    moved
 }
 
 /// A test passes a temporary directory.
@@ -241,40 +333,40 @@ pub fn bisync_dir() -> PathBuf {
     config_home().join("nimbus").join("bisync")
 }
 
-/// Writes a new file when the file does not exist.
+/// Writes a new file when the file does not exist. Only the daemon calls
+/// this, because the daemon is the only writer.
 pub fn load() -> Result<Config> {
     load_from(&default_file())
 }
 
+/// Reads the file without writing it. Returns `None` when the file does not
+/// exist, so a client can read the keys while no daemon runs.
+pub fn read() -> Result<Option<Config>> {
+    read_from(&default_file())
+}
+
 /// A test passes a temporary path.
 fn load_from(file: &Path) -> Result<Config> {
-    if !file.exists() {
-        let cfg = Config::default();
-        save_to(&cfg, file)?;
+    if let Some(cfg) = read_from(file)? {
         return Ok(cfg);
+    }
+    let cfg = Config::default();
+    save_to(&cfg, file)?;
+    Ok(cfg)
+}
+
+/// A test passes a temporary path.
+fn read_from(file: &Path) -> Result<Option<Config>> {
+    if !file.exists() {
+        return Ok(None);
     }
     let text =
         std::fs::read_to_string(file).with_context(|| format!("Cannot read {}", file.display()))?;
-    match toml::from_str::<Config>(&text) {
-        Ok(cfg) => Ok(cfg),
-        // A config from an older build carries a key that this build removed,
-        // and the default error text only says that a field is missing. The
-        // user cannot act on that, so the text names what to do.
-        Err(err) => Err(match removed_key(&text) {
-            Some(key) => anyhow::anyhow!("The config key {key} is obsolete. Delete it."),
-            None => anyhow::anyhow!("Invalid config: {err}"),
-        }),
-    }
-}
-
-/// Returns the first key in the text that the config struct no longer holds.
-///
-/// The list is a literal, because the struct is the only source of truth and a
-/// second list would drift from it.
-fn removed_key(text: &str) -> Option<&'static str> {
-    ["path"]
-        .into_iter()
-        .find(|key| text.lines().any(|line| line.starts_with(key)))
+    // A key that this build removed fails as an unknown field, and serde names
+    // the key in the error text.
+    toml::from_str::<Config>(&text)
+        .map(Some)
+        .map_err(|err| anyhow::anyhow!("Invalid config: {err}"))
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
@@ -375,8 +467,8 @@ mod tests {
             interval_secs: 60,
             debounce_secs: 5,
             resync_pending: false,
-            conflict_resolve: String::from("path2"),
-            conflict_loser: String::from("num"),
+            conflict_resolve: ConflictResolve::Path2,
+            conflict_loser: ConflictLoser::Num,
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
         };
         save_to(&want, &file).expect("the daemon wrote the config file");
@@ -397,8 +489,7 @@ mod tests {
 
     #[test]
     fn a_new_config_targets_the_root_of_the_remote() {
-        let cfg = Config::default();
-        assert_eq!(cfg.remote_path(), "drive:/");
+        assert_eq!(target(&Config::default().remote), "drive:/");
     }
 
     #[test]
@@ -426,12 +517,8 @@ mod tests {
         let err = load_from(&file).expect_err("the daemon must refuse the old key");
         let text = format!("{err:#}");
         assert!(
-            text.contains("path") && text.contains("obsolete"),
-            "the message names the key and what happened: {text}"
-        );
-        assert!(
-            text.contains("Delete it"),
-            "the message tells the user what to do: {text}"
+            text.contains("unknown field `path`"),
+            "the message names the key: {text}"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -451,17 +538,9 @@ mod tests {
         .expect("the daemon wrote the config file");
         let cfg = load_from(&file).expect("the daemon read the older file");
         assert!(cfg.extra_flags.is_empty());
-        assert_eq!(cfg.conflict_resolve, "newer");
-        assert_eq!(cfg.conflict_loser, "delete");
+        assert_eq!(cfg.conflict_resolve, ConflictResolve::Newer);
+        assert_eq!(cfg.conflict_loser, ConflictLoser::Delete);
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // A key that the struct still holds must not be reported as removed.
-    #[test]
-    fn a_current_config_is_not_reported_as_removed() {
-        let cfg = Config::default();
-        let text = toml::to_string_pretty(&cfg).expect("the daemon formatted the config");
-        assert_eq!(removed_key(&text), None);
     }
 
     #[test]
@@ -481,7 +560,7 @@ mod tests {
         };
         assert_eq!(
             cfg.check().map_err(|i| i.key),
-            Err("remote"),
+            Err(Key::Remote),
             "an empty remote is not usable"
         );
     }
@@ -494,7 +573,7 @@ mod tests {
         };
         assert_eq!(
             cfg.check().map_err(|i| i.key),
-            Err("interval_secs"),
+            Err(Key::IntervalSecs),
             "a zero interval starts runs without a pause"
         );
     }
@@ -507,23 +586,47 @@ mod tests {
         };
         assert_eq!(
             cfg.check().map_err(|i| i.key),
-            Err("debounce_secs"),
+            Err(Key::DebounceSecs),
             "a zero debounce starts a run for every file change"
         );
     }
 
+    // The wire carries the conflict values as text, so `apply` refuses an
+    // unknown one and leaves every key as it was.
     #[test]
-    fn check_rejects_an_unknown_conflict_value() {
-        let cfg = Config {
+    fn apply_rejects_an_unknown_conflict_value() {
+        let mut cfg = settled();
+        let latest = Settings {
             conflict_resolve: String::from("latest"),
-            ..Config::default()
+            ..settings()
         };
-        assert_eq!(cfg.check().map_err(|i| i.key), Err("conflict_resolve"));
-        let cfg = Config {
+        assert_eq!(
+            cfg.apply(&latest).map_err(|i| i.key),
+            Err(Key::ConflictResolve)
+        );
+        let drop = Settings {
             conflict_loser: String::from("drop"),
-            ..Config::default()
+            ..settings()
         };
-        assert_eq!(cfg.check().map_err(|i| i.key), Err("conflict_loser"));
+        assert_eq!(cfg.apply(&drop).map_err(|i| i.key), Err(Key::ConflictLoser));
+        assert_eq!(cfg, settled(), "a refused save changes nothing");
+    }
+
+    // Serde reads the file through `as_str`, so the two spellings cannot drift.
+    #[test]
+    fn every_conflict_value_reads_back_from_its_spelling() {
+        for value in ConflictResolve::ALL {
+            assert_eq!(
+                ConflictResolve::try_from(String::from(value.as_str())),
+                Ok(value)
+            );
+        }
+        for value in ConflictLoser::ALL {
+            assert_eq!(
+                ConflictLoser::try_from(String::from(value.as_str())),
+                Ok(value)
+            );
+        }
     }
 
     #[test]
@@ -535,7 +638,7 @@ mod tests {
         // The settings dialog shows the reason under the field with this key.
         assert_eq!(
             cfg.check().map_err(|i| i.key),
-            Err("local"),
+            Err(Key::Local),
             "rclone copies nothing without a local directory"
         );
     }
@@ -562,8 +665,8 @@ mod tests {
             resync_pending: false,
             interval_secs: 60,
             debounce_secs: 5,
-            conflict_resolve: String::from("newer"),
-            conflict_loser: String::from("delete"),
+            conflict_resolve: ConflictResolve::Newer,
+            conflict_loser: ConflictLoser::Delete,
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
         }
     }
@@ -571,9 +674,9 @@ mod tests {
     /// The daemon owns the pause and the resync flag. A client that writes
     /// every key would clear a flag that keeps rclone running.
     #[test]
-    fn apply_settings_keeps_the_daemon_keys() {
+    fn apply_keeps_the_daemon_keys() {
         let mut cfg = settled();
-        apply_settings(&mut cfg, &settings());
+        cfg.apply(&settings()).expect("the keys are valid");
         assert!(cfg.paused, "the daemon owns the pause");
         assert!(
             !cfg.resync_pending,
@@ -583,17 +686,17 @@ mod tests {
         assert_eq!(cfg.local.text(), "/srv/notes");
         assert_eq!(cfg.interval_secs, 60);
         assert_eq!(cfg.debounce_secs, 5);
-        assert_eq!(cfg.conflict_resolve, "path1");
-        assert_eq!(cfg.conflict_loser, "pathname");
+        assert_eq!(cfg.conflict_resolve, ConflictResolve::Path1);
+        assert_eq!(cfg.conflict_loser, ConflictLoser::Pathname);
         assert_eq!(cfg.extra_flags, ["--drive-skip-shortcuts"]);
     }
 
     #[test]
     fn a_round_trip_through_settings_keeps_every_key() {
         let mut cfg = settled();
-        let read = settings_of(&cfg);
-        apply_settings(&mut cfg, &read);
-        assert_eq!(settings_of(&cfg), read);
+        let read = cfg.settings();
+        cfg.apply(&read).expect("the keys are valid");
+        assert_eq!(cfg.settings(), read);
         assert!(cfg.paused, "the pause survived the round trip");
     }
 
@@ -612,7 +715,7 @@ mod tests {
             },
         ] {
             let mut cfg = settled();
-            apply_settings(&mut cfg, &moved);
+            cfg.apply(&moved).expect("the keys are valid");
             assert!(
                 cfg.resync_pending,
                 "{:?} has no listing, so the next run must resync",
@@ -630,7 +733,7 @@ mod tests {
             local: String::from("/srv/notes/"),
             ..settings()
         };
-        apply_settings(&mut cfg, &same);
+        cfg.apply(&same).expect("the keys are valid");
         assert!(
             !cfg.resync_pending,
             "the folder did not move, so the listing still fits"

@@ -165,12 +165,12 @@ fn command(cfg: &Config) -> Command {
     }
     // The extra flags come later, so a value there overrides these two.
     cmd.arg("--conflict-resolve")
-        .arg(&cfg.conflict_resolve)
+        .arg(cfg.conflict_resolve.as_str())
         .arg("--conflict-loser")
-        .arg(&cfg.conflict_loser)
+        .arg(cfg.conflict_loser.as_str())
         .args(&cfg.extra_flags)
         .arg(cfg.local.path())
-        .arg(cfg.remote_path())
+        .arg(config::target(&cfg.remote))
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     cmd
@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn the_command_passes_the_conflict_choice() {
         let cfg = Config {
-            conflict_resolve: String::from("path2"),
-            conflict_loser: String::from("num"),
+            conflict_resolve: config::ConflictResolve::Path2,
+            conflict_loser: config::ConflictLoser::Num,
             ..Config::default()
         };
         let args = args_of(&cfg);

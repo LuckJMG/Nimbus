@@ -1,13 +1,15 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nimbus_ipc::{Phase, Settings, State};
 
-use crate::config::{Config, apply_settings};
+use crate::config::Config;
 use crate::rclone::Outcome;
 
 /// A message for the engine. The watcher, the run thread, and the D-Bus
 /// service send these.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum Event {
     /// Starts a run at once.
     SyncNow,
@@ -15,9 +17,9 @@ pub enum Event {
     SetPaused(bool),
     /// Writes the keys that a client may change.
     SetSettings(Settings),
-    /// A read event does not send this, because rclone reads the folder
-    /// during every run.
-    Changed,
+    /// A file in the local folder changed. A read event does not send this,
+    /// because rclone reads the folder during every run.
+    FileChanged,
     /// The ratio is from 0.0 to 1.0.
     Progress(f64),
     /// The tail holds the last error messages.
@@ -54,6 +56,9 @@ pub struct Engine {
     /// Why the pending resync is needed. The state carries it in the error
     /// field, so the window can name it in the resync dialog.
     resync_reason: &'static str,
+    /// The run thread reads this flag between output lines and stops rclone
+    /// when it is set. `set_paused` is the only writer.
+    pause: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -65,6 +70,7 @@ impl Engine {
             Phase::Idle
         };
         Self {
+            pause: Arc::new(AtomicBool::new(cfg.paused)),
             cfg,
             state: State {
                 phase,
@@ -92,25 +98,21 @@ impl Engine {
         &self.state
     }
 
+    /// The flag that a run thread watches for a pause.
+    pub fn pause_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.pause)
+    }
+
     /// The caller supplies both clocks, so a test can choose the time.
     pub fn on_event(&mut self, event: Event, now: Instant, unix: u64) {
         match event {
             Event::SyncNow => self.run_wanted = true,
             Event::SetPaused(paused) => self.set_paused(paused),
             Event::SetSettings(settings) => self.set_settings(&settings),
-            Event::Changed => self.last_change = Some(now),
+            Event::FileChanged => self.last_change = Some(now),
             Event::Progress(ratio) => self.on_progress(ratio),
             Event::Finished { outcome, tail } => self.on_finished(outcome, &tail, now, unix),
-            Event::NeedsResync => {
-                self.running = false;
-                self.last_finish = Some(now);
-                self.state.progress = 0.0;
-                self.resync_reason = LOST;
-                if !self.cfg.resync_pending {
-                    self.cfg.resync_pending = true;
-                    self.dirty = true;
-                }
-            }
+            Event::NeedsResync => self.on_needs_resync(now),
             Event::Resync => {
                 if self.cfg.resync_pending {
                     self.confirmed = true;
@@ -120,9 +122,10 @@ impl Engine {
         }
     }
 
-    /// Returns true when the daemon must start a run. The engine stays busy
-    /// afterwards, so one turn starts at most one run.
-    pub fn wants_run(&mut self, now: Instant) -> bool {
+    /// Starts a run when one is due, and returns true when it did. The engine
+    /// stays busy afterwards, so one turn starts at most one run. A pending
+    /// resync without a confirmation moves the phase to `resync` instead.
+    pub fn start_run_if_due(&mut self, now: Instant) -> bool {
         if self.running || self.cfg.paused {
             return false;
         }
@@ -166,6 +169,7 @@ impl Engine {
 
     fn set_paused(&mut self, paused: bool) {
         self.cfg.paused = paused;
+        self.pause.store(paused, Ordering::Relaxed);
         self.dirty = true;
         if paused {
             self.state.phase = Phase::Paused;
@@ -183,13 +187,31 @@ impl Engine {
     /// the resync flag, so the daemon owns both.
     ///
     /// A move needs a resync, and the resync waits for the user like any other.
+    /// The service checks the keys before they arrive, so a refusal here
+    /// leaves the config as it was.
     fn set_settings(&mut self, settings: &Settings) {
-        if apply_settings(&mut self.cfg, settings) {
+        let Ok(moved) = self.cfg.apply(settings) else {
+            return;
+        };
+        if moved {
             self.resync_reason = MOVED;
             // The reason replaces an older message on the next gate check.
             self.state.last_error = String::new();
         }
         self.dirty = true;
+    }
+
+    /// The run found no listing to repair. The flag goes into the file, so it
+    /// survives a restart, and the file is written once.
+    fn on_needs_resync(&mut self, now: Instant) {
+        self.running = false;
+        self.last_finish = Some(now);
+        self.state.progress = 0.0;
+        self.resync_reason = LOST;
+        if !self.cfg.resync_pending {
+            self.cfg.resync_pending = true;
+            self.dirty = true;
+        }
     }
 
     fn on_progress(&mut self, ratio: f64) {
@@ -274,6 +296,13 @@ mod tests {
         Engine::new(cfg)
     }
 
+    /// The keys of the config that `engine` builds, with the changes in `over`.
+    fn keys(over: impl FnOnce(&mut Settings)) -> Settings {
+        let mut settings = engine(|_| {}).config().settings();
+        over(&mut settings);
+        settings
+    }
+
     fn done(engine: &mut Engine, at: Instant, outcome: Outcome, tail: &[&str]) {
         let tail = tail.iter().map(|line| String::from(*line)).collect();
         engine.on_event(Event::Finished { outcome, tail }, at, UNIX);
@@ -298,7 +327,7 @@ mod tests {
     fn a_new_engine_wants_a_first_run() {
         let mut e = engine(|_| {});
         assert!(
-            e.wants_run(Instant::now()),
+            e.start_run_if_due(Instant::now()),
             "the first run must not wait for the interval"
         );
     }
@@ -306,7 +335,7 @@ mod tests {
     #[test]
     fn a_run_sets_the_syncing_phase() {
         let mut e = engine(|_| {});
-        assert!(e.wants_run(Instant::now()));
+        assert!(e.start_run_if_due(Instant::now()));
         assert_eq!(e.snapshot().phase, Phase::Syncing);
         assert_eq!(e.snapshot().progress, 0.0);
     }
@@ -314,9 +343,9 @@ mod tests {
     #[test]
     fn one_turn_starts_one_run() {
         let mut e = engine(|_| {});
-        assert!(e.wants_run(Instant::now()));
+        assert!(e.start_run_if_due(Instant::now()));
         assert!(
-            !e.wants_run(Instant::now()),
+            !e.start_run_if_due(Instant::now()),
             "one turn must not start a second run"
         );
     }
@@ -326,8 +355,11 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         done(&mut e, at, Outcome::Success, &[]);
-        e.on_event(Event::Changed, at, UNIX);
-        assert!(!e.wants_run(at), "the quiet time must hold the run back");
+        e.on_event(Event::FileChanged, at, UNIX);
+        assert!(
+            !e.start_run_if_due(at),
+            "the quiet time must hold the run back"
+        );
     }
 
     #[test]
@@ -335,9 +367,9 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         done(&mut e, at, Outcome::Success, &[]);
-        e.on_event(Event::Changed, at, UNIX);
-        assert!(!e.wants_run(at + Duration::from_secs(29)));
-        assert!(e.wants_run(at + Duration::from_secs(30)));
+        e.on_event(Event::FileChanged, at, UNIX);
+        assert!(!e.start_run_if_due(at + Duration::from_secs(29)));
+        assert!(e.start_run_if_due(at + Duration::from_secs(30)));
     }
 
     #[test]
@@ -345,14 +377,14 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         done(&mut e, at, Outcome::Success, &[]);
-        e.on_event(Event::Changed, at, UNIX);
-        assert!(!e.wants_run(at + Duration::from_secs(25)));
-        e.on_event(Event::Changed, at + Duration::from_secs(20), UNIX);
+        e.on_event(Event::FileChanged, at, UNIX);
+        assert!(!e.start_run_if_due(at + Duration::from_secs(25)));
+        e.on_event(Event::FileChanged, at + Duration::from_secs(20), UNIX);
         assert!(
-            !e.wants_run(at + Duration::from_secs(45)),
+            !e.start_run_if_due(at + Duration::from_secs(45)),
             "the second change resets the clock"
         );
-        assert!(e.wants_run(at + Duration::from_secs(50)));
+        assert!(e.start_run_if_due(at + Duration::from_secs(50)));
     }
 
     #[test]
@@ -360,8 +392,8 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         done(&mut e, at, Outcome::Success, &[]);
-        assert!(!e.wants_run(at + Duration::from_secs(899)));
-        assert!(e.wants_run(at + Duration::from_secs(900)));
+        assert!(!e.start_run_if_due(at + Duration::from_secs(899)));
+        assert!(e.start_run_if_due(at + Duration::from_secs(900)));
     }
 
     #[test]
@@ -369,7 +401,18 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         e.on_event(Event::SetPaused(true), at, UNIX);
-        assert!(!e.wants_run(at + Duration::from_secs(100_000)));
+        assert!(!e.start_run_if_due(at + Duration::from_secs(100_000)));
+    }
+
+    // A pause stops the run that is active, so the run thread must see it.
+    #[test]
+    fn a_pause_reaches_the_run_thread() {
+        let mut e = engine(|_| {});
+        let flag = e.pause_flag();
+        e.on_event(Event::SetPaused(true), Instant::now(), UNIX);
+        assert!(flag.load(Ordering::Relaxed));
+        e.on_event(Event::SetPaused(false), Instant::now(), UNIX);
+        assert!(!flag.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -378,7 +421,10 @@ mod tests {
         let mut e = engine(|cfg| cfg.paused = true);
         e.on_event(Event::SetPaused(false), at, UNIX);
         assert_eq!(e.snapshot().phase, Phase::Idle);
-        assert!(e.wants_run(at), "the user resumes because they want a run");
+        assert!(
+            e.start_run_if_due(at),
+            "the user resumes because they want a run"
+        );
     }
 
     #[test]
@@ -387,7 +433,7 @@ mod tests {
         let mut e = engine(|cfg| cfg.interval_secs = 100_000);
         done(&mut e, at, Outcome::Success, &[]);
         e.on_event(Event::SyncNow, at, UNIX);
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
     }
 
     #[test]
@@ -412,15 +458,11 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|_| {});
         e.on_event(
-            Event::SetSettings(Settings {
-                remote: String::from("my-drive"),
-                local: String::from("/srv/nimbus"),
-                interval_secs: 60,
-                debounce_secs: 5,
-                conflict_resolve: String::from("newer"),
-                conflict_loser: String::from("delete"),
-                extra_flags: Vec::new(),
-            }),
+            Event::SetSettings(keys(|s| {
+                s.remote = String::from("my-drive");
+                s.interval_secs = 60;
+                s.debounce_secs = 5;
+            })),
             at,
             UNIX,
         );
@@ -438,19 +480,7 @@ mod tests {
             cfg.paused = true;
             cfg.resync_pending = false;
         });
-        e.on_event(
-            Event::SetSettings(Settings {
-                remote: String::from("drive"),
-                local: String::from("/srv/nimbus"),
-                interval_secs: 900,
-                debounce_secs: 30,
-                conflict_resolve: String::from("newer"),
-                conflict_loser: String::from("delete"),
-                extra_flags: Vec::new(),
-            }),
-            Instant::now(),
-            UNIX,
-        );
+        e.on_event(Event::SetSettings(keys(|_| {})), Instant::now(), UNIX);
         assert!(e.config().paused, "the daemon owns the pause");
         assert!(
             !e.config().resync_pending,
@@ -465,25 +495,13 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|cfg| cfg.interval_secs = 900);
         done(&mut e, at, Outcome::Success, &[]);
-        e.on_event(
-            Event::SetSettings(Settings {
-                remote: String::from("drive"),
-                local: String::from("/srv/nimbus"),
-                interval_secs: 60,
-                debounce_secs: 30,
-                conflict_resolve: String::from("newer"),
-                conflict_loser: String::from("delete"),
-                extra_flags: Vec::new(),
-            }),
-            at,
-            UNIX,
-        );
+        e.on_event(Event::SetSettings(keys(|s| s.interval_secs = 60)), at, UNIX);
         assert!(
-            !e.wants_run(at + Duration::from_secs(59)),
+            !e.start_run_if_due(at + Duration::from_secs(59)),
             "the quiet time must hold the run back"
         );
         assert!(
-            e.wants_run(at + Duration::from_secs(61)),
+            e.start_run_if_due(at + Duration::from_secs(61)),
             "the new timer must fire"
         );
     }
@@ -514,12 +532,12 @@ mod tests {
     fn a_pending_resync_waits_for_the_user() {
         let at = Instant::now();
         let mut e = engine(|cfg| cfg.resync_pending = true);
-        assert!(!e.wants_run(at), "a resync needs a confirmation");
+        assert!(!e.start_run_if_due(at), "a resync needs a confirmation");
         assert_eq!(e.snapshot().phase, Phase::Resync);
         e.on_event(Event::SyncNow, at, UNIX);
-        assert!(!e.wants_run(at), "Sync now is not a confirmation");
+        assert!(!e.start_run_if_due(at), "Sync now is not a confirmation");
         e.on_event(Event::Resync, at, UNIX);
-        assert!(e.wants_run(at), "the confirmation starts the resync");
+        assert!(e.start_run_if_due(at), "the confirmation starts the resync");
     }
 
     // The repair fails when the run left no listing at all. rclone then
@@ -528,12 +546,12 @@ mod tests {
     fn a_run_without_a_listing_asks_for_a_resync() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         e.on_event(Event::NeedsResync, at, UNIX);
         assert!(e.config().resync_pending, "the flag survives a restart");
         assert!(e.take_dirty(), "the daemon must write the config file");
         e.on_event(Event::SyncNow, at, UNIX);
-        assert!(!e.wants_run(at), "the resync waits for the user");
+        assert!(!e.start_run_if_due(at), "the resync waits for the user");
         assert_eq!(e.snapshot().phase, Phase::Resync);
     }
 
@@ -541,10 +559,10 @@ mod tests {
     fn a_confirmed_resync_recovers_the_daemon() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         e.on_event(Event::NeedsResync, at, UNIX);
         e.on_event(Event::Resync, at, UNIX);
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         done(&mut e, at, Outcome::Success, &[]);
         assert!(!e.config().resync_pending, "the clean run cleared it");
         assert_eq!(e.snapshot().phase, Phase::Idle);
@@ -557,10 +575,10 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|cfg| cfg.resync_pending = true);
         e.on_event(Event::Resync, at, UNIX);
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         done(&mut e, at, Outcome::Failed(7), &[]);
         e.on_event(Event::SyncNow, at, UNIX);
-        assert!(!e.wants_run(at), "the failed resync asks again");
+        assert!(!e.start_run_if_due(at), "the failed resync asks again");
     }
 
     // A move needs a resync, and the window asks for it with the reason. The
@@ -569,23 +587,15 @@ mod tests {
     fn a_moved_folder_asks_for_a_resync() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         done(&mut e, at, Outcome::Success, &[]);
         e.on_event(
-            Event::SetSettings(Settings {
-                remote: String::from("drive"),
-                local: String::from("/srv/elsewhere"),
-                interval_secs: 900,
-                debounce_secs: 30,
-                conflict_resolve: String::from("newer"),
-                conflict_loser: String::from("delete"),
-                extra_flags: Vec::new(),
-            }),
+            Event::SetSettings(keys(|s| s.local = String::from("/srv/elsewhere"))),
             at,
             UNIX,
         );
         e.on_event(Event::SyncNow, at, UNIX);
-        assert!(!e.wants_run(at), "the move is not a confirmation");
+        assert!(!e.start_run_if_due(at), "the move is not a confirmation");
         assert_eq!(e.snapshot().phase, Phase::Resync);
         assert_eq!(e.snapshot().last_error, MOVED);
     }
@@ -595,12 +605,12 @@ mod tests {
     fn a_lost_record_names_its_reason() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         e.on_event(Event::NeedsResync, at, UNIX);
-        assert!(!e.wants_run(at));
+        assert!(!e.start_run_if_due(at));
         assert_eq!(e.snapshot().last_error, LOST);
         let mut fresh = engine(|cfg| cfg.resync_pending = true);
-        assert!(!fresh.wants_run(at));
+        assert!(!fresh.start_run_if_due(at));
         assert_eq!(fresh.snapshot().last_error, NO_RECORD);
     }
 
@@ -611,9 +621,9 @@ mod tests {
         let at = Instant::now();
         let mut e = engine(|cfg| cfg.resync_pending = true);
         e.on_event(Event::Resync, at, UNIX);
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         done(&mut e, at, Outcome::Failed(7), &["the remote is gone"]);
-        assert!(!e.wants_run(at));
+        assert!(!e.start_run_if_due(at));
         assert_eq!(e.snapshot().phase, Phase::Resync);
         assert_eq!(e.snapshot().last_error, "the remote is gone");
     }
@@ -623,11 +633,14 @@ mod tests {
     fn a_confirmation_without_a_pending_resync_does_nothing() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         done(&mut e, at, Outcome::Success, &[]);
         e.on_event(Event::Resync, at, UNIX);
         e.on_event(Event::NeedsResync, at, UNIX);
-        assert!(!e.wants_run(at), "the old confirmation must not count");
+        assert!(
+            !e.start_run_if_due(at),
+            "the old confirmation must not count"
+        );
     }
 
     // The flag is already set when a second refusal arrives, so the config
@@ -676,7 +689,7 @@ mod tests {
     fn progress_updates_once_for_each_whole_percent() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         e.on_event(Event::Progress(0.501), at, UNIX);
         e.on_event(Event::Progress(0.504), at, UNIX);
         assert_eq!(
@@ -692,7 +705,7 @@ mod tests {
     fn a_finished_run_clears_the_ratio() {
         let at = Instant::now();
         let mut e = engine(|_| {});
-        assert!(e.wants_run(at));
+        assert!(e.start_run_if_due(at));
         e.on_event(Event::Progress(0.5), at, UNIX);
         done(&mut e, at, Outcome::Success, &[]);
         assert_eq!(

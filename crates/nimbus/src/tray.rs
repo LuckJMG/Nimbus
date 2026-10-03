@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use ksni::blocking::Handle;
 use nimbus_ipc::Phase;
 
-use crate::view::{Action, View, is_paused, is_syncing, phase, status_name, status_text};
-use crate::window::{PAUSE_ICON, SYNC_ICON};
+use crate::view::{Action, View, is_paused, phase, status_name, status_text};
+use crate::window::{PAUSE_ICON, SETTINGS_ICON, SYNC_ICON};
 
 /// One icon file that every install ships, so its presence proves the theme
 /// directory. The `-symbolic` name suffix is not decoration. GTK reads it to
@@ -37,6 +37,12 @@ fn phase_icon(view: &View) -> &'static str {
     }
 }
 
+/// The engine drops a Sync now request while a run is active, so the menu
+/// disables the row.
+fn is_syncing(view: &View) -> bool {
+    phase(view) == Some(Phase::Syncing)
+}
+
 /// Builds the tooltip for the panel.
 fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
     ksni::ToolTip {
@@ -64,6 +70,15 @@ impl NimbusTray {
 
     fn current(&self) -> View {
         self.view.lock().expect("the view lock").clone()
+    }
+
+    /// A menu callback that sends `action`. The callback runs on a thread of
+    /// the tray service and must not block, so it only sends on the channel.
+    fn send_on_activate(&self, action: Action) -> Box<dyn Fn(&mut Self) + Send> {
+        let actions = self.actions.clone();
+        Box::new(move |_| {
+            let _ = actions.send(action.clone());
+        })
     }
 }
 
@@ -112,8 +127,6 @@ impl ksni::Tray for NimbusTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
         let view = self.current();
-        let sync_actions = self.actions.clone();
-        let pause_actions = self.actions.clone();
         vec![
             MenuItem::Standard(StandardItem {
                 label: status_name(&view),
@@ -127,9 +140,7 @@ impl ksni::Tray for NimbusTray {
                 // The engine drops a request while a run is active, so a
                 // click on an enabled item would look broken.
                 enabled: !is_syncing(&view),
-                activate: Box::new(move |_: &mut Self| {
-                    let _ = sync_actions.send(Action::SyncNow);
-                }),
+                activate: self.send_on_activate(Action::SyncNow),
                 ..Default::default()
             }),
             MenuItem::Checkmark(CheckmarkItem {
@@ -140,9 +151,7 @@ impl ksni::Tray for NimbusTray {
                 // The view is the only record of the pause state. A cached
                 // flag would show a tick the daemon never confirmed.
                 checked: is_paused(&view),
-                activate: Box::new(move |_| {
-                    let _ = pause_actions.send(Action::TogglePaused);
-                }),
+                activate: self.send_on_activate(Action::TogglePaused),
                 ..Default::default()
             }),
             MenuItem::Separator,
@@ -150,13 +159,8 @@ impl ksni::Tray for NimbusTray {
                 // The row opens the dialog. It cannot open the status window,
                 // because the status window has no field to change.
                 label: String::from("Settings"),
-                icon_name: String::from("preferences-system-symbolic"),
-                activate: {
-                    let settings_actions = self.actions.clone();
-                    Box::new(move |_| {
-                        let _ = settings_actions.send(Action::OpenSettings);
-                    })
-                },
+                icon_name: String::from(SETTINGS_ICON),
+                activate: self.send_on_activate(Action::OpenSettings),
                 ..Default::default()
             }),
             MenuItem::Standard(StandardItem {
@@ -336,29 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn the_pause_state_comes_from_the_view() {
-        assert!(is_paused(&ready(Phase::Paused, "")));
-        assert!(!is_paused(&ready(Phase::Idle, "")));
-        assert!(
-            !is_paused(&View::Offline(String::new())),
-            "a missing daemon is not paused"
-        );
-    }
-
-    #[test]
     fn the_sync_state_comes_from_the_view() {
         assert!(is_syncing(&ready(Phase::Syncing, "")));
         assert!(!is_syncing(&ready(Phase::Idle, "")));
         assert!(!is_syncing(&View::Offline(String::new())));
-    }
-
-    #[test]
-    fn the_menu_header_shortens_the_error() {
-        assert_eq!(status_name(&ready(Phase::Error, "Bisync aborted")), "Error");
-        assert_eq!(
-            status_text(&ready(Phase::Error, "Bisync aborted")),
-            "Bisync aborted"
-        );
     }
 
     #[test]

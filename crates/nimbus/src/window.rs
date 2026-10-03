@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
 use gtk::prelude::*;
@@ -68,6 +70,15 @@ fn action_button(name: &str, text: &str) -> (Button, Image, Label) {
     (button, icon, label)
 }
 
+/// Sends `action` on every click. A GTK callback must not block, so it only
+/// sends on the channel.
+fn send_on_click(button: &Button, actions: &Sender<Action>, action: Action) {
+    let actions = actions.clone();
+    button.connect_clicked(move |_| {
+        let _ = actions.send(action.clone());
+    });
+}
+
 /// The error line, or `None` when the line must hide itself. A hidden line
 /// leaves no gap, so a run that succeeds leaves no scar. With no daemon, the
 /// line explains why and names the fix.
@@ -79,7 +90,7 @@ fn error_line(view: &View) -> Option<&str> {
     (!text.is_empty()).then_some(text.as_str())
 }
 
-pub struct App {
+pub struct StatusWindow {
     /// The timer holds a weak reference to this window, so it can outlive the
     /// call that built it.
     pub root: Window,
@@ -93,9 +104,12 @@ pub struct App {
     start: Button,
     pause_icon: Image,
     pause_text: Label,
+    /// The text of the error line. In the resync phase it holds the reason
+    /// from the daemon, and the resync dialog names it.
+    resync_reason: Rc<RefCell<String>>,
 }
 
-impl App {
+impl StatusWindow {
     /// Rewrites every field. The caller checks for a change first, so this runs
     /// only when the view moved. The heading takes the short name, because the
     /// error line below it carries the message from the daemon.
@@ -113,20 +127,22 @@ impl App {
         self.resync.set_visible(resync);
         self.pause.set_visible(!offline);
         self.start.set_visible(offline);
-        let View::Ready(state) = view else {
-            self.progress.set_fraction(0.0);
-            self.progress.set_text(Some("no connection"));
-            self.last_run.set_text(&ago_since(0, now));
-            self.error.set_text(error_line(view).unwrap_or_default());
-            self.error.set_visible(error_line(view).is_some());
-            return;
+        let (fraction, text, last_run) = match view {
+            View::Ready(state) => (
+                state.progress,
+                format!("{:.0}%", state.progress * 100.0),
+                state.last_run,
+            ),
+            View::Offline(_) => (0.0, String::from("no connection"), 0),
         };
-        self.progress.set_fraction(state.progress);
-        self.progress
-            .set_text(Some(&format!("{:.0}%", state.progress * 100.0)));
-        self.last_run.set_text(&ago_since(state.last_run, now));
-        self.error.set_text(error_line(view).unwrap_or_default());
-        self.error.set_visible(error_line(view).is_some());
+        self.progress.set_fraction(fraction);
+        self.progress.set_text(Some(&text));
+        self.last_run.set_text(&ago_since(last_run, now));
+        let error = error_line(view);
+        self.error.set_text(error.unwrap_or_default());
+        self.error.set_visible(error.is_some());
+        self.resync_reason
+            .replace(String::from(error.unwrap_or_default()));
     }
 }
 
@@ -154,8 +170,10 @@ fn confirm_resync(parent: &Window, reason: &str, actions: &Sender<Action>) {
 
 /// Builds the window. Every widget is a stock GTK widget, so the window
 /// follows the theme of the desktop. The window sets no title bar, so the
-/// caption comes from the desktop and takes no room from the body.
-pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
+/// caption comes from the desktop and takes no room from the body. The
+/// display-wide CSS comes from `install_css`, next to the call that builds
+/// this window.
+pub fn build(app: &gtk::Application, actions: Sender<Action>) -> StatusWindow {
     let root = Window::builder()
         .application(app)
         .title("Nimbus")
@@ -164,16 +182,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         // shrinks with the error line.
         .resizable(false)
         .build();
-    // Breeze rounds the bottom corners of the body, but the frame around it
-    // stays square, so the desktop shows through two small gaps. The rule
-    // covers the whole display, so the settings dialog loses the gaps too.
-    let corners = gtk::CssProvider::new();
-    corners.load_from_data("window { border-radius: 0; }");
-    gtk::style_context_add_provider_for_display(
-        &WidgetExt::display(&root),
-        &corners,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
     // Closing the window hides it. The tray keeps running, and a left click
     // brings the window back.
     root.set_hide_on_close(true);
@@ -200,41 +208,29 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     error.set_visible(false);
 
     let (sync, _, _) = action_button(SYNC_ICON, "Sync now");
-    let sync_actions = actions.clone();
-    sync.connect_clicked(move |_| {
-        let _ = sync_actions.send(Action::SyncNow);
-    });
+    send_on_click(&sync, &actions, Action::SyncNow);
 
     let (resync, _, _) = action_button(SYNC_ICON, "Resync");
     resync.set_visible(false);
-    // In the resync phase the error line holds the reason from the daemon.
+    let resync_reason = Rc::new(RefCell::new(String::new()));
     let resync_actions = actions.clone();
     let resync_parent = root.clone();
-    let resync_reason = error.clone();
+    let reason = Rc::clone(&resync_reason);
     resync.connect_clicked(move |_| {
-        confirm_resync(&resync_parent, &resync_reason.text(), &resync_actions);
+        confirm_resync(&resync_parent, &reason.borrow(), &resync_actions);
     });
 
     let (pause, pause_icon, pause_text) = action_button(PAUSE_ICON, "Pause");
-    let pause_actions = actions.clone();
-    pause.connect_clicked(move |_| {
-        let _ = pause_actions.send(Action::TogglePaused);
-    });
+    send_on_click(&pause, &actions, Action::TogglePaused);
 
     let (start, _, _) = action_button(RESUME_ICON, "Start daemon");
     start.set_visible(false);
-    let start_actions = actions.clone();
-    start.connect_clicked(move |_| {
-        let _ = start_actions.send(Action::StartDaemon);
-    });
+    send_on_click(&start, &actions, Action::StartDaemon);
 
     // The button opens the same dialog as the menu row, so the window needs no
     // field of its own and no second route to the keys.
     let (settings, _, _) = action_button(SETTINGS_ICON, "Settings");
-    let settings_actions = actions;
-    settings.connect_clicked(move |_| {
-        let _ = settings_actions.send(Action::OpenSettings);
-    });
+    send_on_click(&settings, &actions, Action::OpenSettings);
 
     // The two run buttons sit at the start. Settings sits at the end, because
     // it opens a dialog instead of running a sync, so it is not one of them.
@@ -268,7 +264,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     body.append(&buttons);
     root.set_child(Some(&body));
 
-    App {
+    StatusWindow {
         root,
         phase,
         progress,
@@ -280,6 +276,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         start,
         pause_icon,
         pause_text,
+        resync_reason,
     }
 }
 
