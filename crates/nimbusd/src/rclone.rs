@@ -163,7 +163,12 @@ fn command(cfg: &Config) -> Command {
     if cfg.resync_pending {
         cmd.arg("--resync");
     }
-    cmd.args(&cfg.extra_flags)
+    // The extra flags come later, so a value there overrides these two.
+    cmd.arg("--conflict-resolve")
+        .arg(&cfg.conflict_resolve)
+        .arg("--conflict-loser")
+        .arg(&cfg.conflict_loser)
+        .args(&cfg.extra_flags)
         .arg(cfg.local.path())
         .arg(cfg.remote_path())
         .stdout(Stdio::null())
@@ -346,6 +351,22 @@ mod tests {
             args[n - 4..n - 2],
             ["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]
         );
+    }
+
+    #[test]
+    fn the_command_passes_the_conflict_choice() {
+        let cfg = Config {
+            conflict_resolve: String::from("path2"),
+            conflict_loser: String::from("num"),
+            ..Config::default()
+        };
+        let args = args_of(&cfg);
+        let at = |flag: &str| {
+            let i = args.iter().position(|arg| arg == flag).expect(flag);
+            args[i + 1].clone()
+        };
+        assert_eq!(at("--conflict-resolve"), "path2");
+        assert_eq!(at("--conflict-loser"), "num");
     }
 
     // rclone cannot open a path that starts with a tilde, so the command must

@@ -94,6 +94,8 @@ The Settings dialog of the tray writes the same file while the daemon runs.
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`, after you confirm it. The flag clears only after a run that ends without an error. |
+| `conflict_resolve` | `newer` | The copy that wins when a file changed on both sides: `none`, `newer`, `older`, `larger`, `smaller`, `path1` (local), or `path2` (remote). `none` keeps both copies. |
+| `conflict_loser` | `delete` | What happens to the copy that lost: `num` renames it with the next free number, as in `name.conflict1`. `pathname` renames it with the number of its origin: `name.conflict1` is local and `name.conflict2` is remote. `delete` removes it for good. With `none`, no copy loses, so rclone keeps both. |
 | `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]`. |
 
 The daemon syncs the root of the remote, so the whole drive is the target. A
@@ -142,7 +144,7 @@ instead.
 | Quit | Stops the tray. The daemon keeps running. |
 
 The Settings row opens a dialog for `remote`, `local`, `interval_secs`,
-`debounce_secs`, and `extra_flags`. The dialog takes the flags as one line,
+`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The dialog takes the flags as one line,
 separated by spaces. The daemon takes the new keys at once and writes the file.
 A time above 86400 needs the file, because the dialog stops at one day.
 
@@ -169,7 +171,7 @@ Any client can read the state and send the same commands.
 | Object path | `/io/github/luckjmg/nimbus` |
 | Interface | `io.github.luckjmg.nimbus1` |
 | Property | `State`, signature `(sdts)` |
-| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttas)`, `Resync` |
+| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttssas)`, `Resync` |
 | Signal | `Changed(State)` |
 
 The four values of the signature are the phase as a string, the progress as a
@@ -185,11 +187,11 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttas drive '~/Cloud' 900 30 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttssas drive '~/Cloud' 900 30 newer delete 0
 ```
 
-The values of `ssttas` are `remote`, `local`, `interval_secs`,
-`debounce_secs`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the problem, for example:
+The values of `ssttssas` are `remote`, `local`, `interval_secs`,
+`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the problem, for example:
 
 ```console
 Call failed: The remote is empty. Set it to an rclone remote name, for example drive.

@@ -5,16 +5,58 @@ use std::sync::mpsc::Sender;
 
 use gtk::gio;
 use gtk::prelude::*;
-use gtk::{Align, Box as GtkBox, Button, Entry, Label, Orientation, SpinButton, Window};
+use gtk::{Align, Box as GtkBox, Button, DropDown, Entry, Label, Orientation, SpinButton, Window};
 
 use nimbus_ipc::Settings;
-use nimbusd::config::{Config, Invalid, apply_settings};
+use nimbusd::config::{Config, Invalid, apply_settings, settings_of};
 
 use crate::view::Action;
 
 /// The largest value that a spin button takes, in seconds. The config file has
 /// no upper bound, so a value above this needs the file.
 const MOST_SECONDS: f64 = 86_400.0;
+
+/// The choices for `--conflict-resolve`, as the config value and the words
+/// that the dialog shows. A test holds the values equal to the daemon list.
+const RESOLVE: [(&str, &str); 7] = [
+    ("none", "Both"),
+    ("newer", "Newer"),
+    ("older", "Older"),
+    ("larger", "Larger"),
+    ("smaller", "Smaller"),
+    ("path1", "Local"),
+    ("path2", "Remote"),
+];
+
+/// The choices for `--conflict-loser`. rclone uses them only when a copy wins.
+/// A live run measured the two renames. `num` takes the next free number, as
+/// in `f.conflict1`. `pathname` takes the number of the origin, so
+/// `f.conflict1` is the local copy and `f.conflict2` is the remote copy.
+const LOSER: [(&str, &str); 3] = [
+    ("num", "Rename with number"),
+    ("pathname", "Rename with origin"),
+    ("delete", "Delete"),
+];
+
+fn choice(pairs: &[(&str, &str)]) -> DropDown {
+    let words: Vec<&str> = pairs.iter().map(|(_, words)| *words).collect();
+    DropDown::from_strings(&words)
+}
+
+/// The config value of the selected row. The list has no empty row, so the
+/// first value stands in for a selection that does not exist.
+fn chosen(field: &DropDown, pairs: &[(&str, &str)]) -> String {
+    let (value, _) = pairs.get(field.selected() as usize).unwrap_or(&pairs[0]);
+    String::from(*value)
+}
+
+/// Selects the row of a value. An unknown value keeps the row, because the
+/// daemon refuses that value at start and the dialog cannot show it.
+fn select(field: &DropDown, pairs: &[(&str, &str)], value: &str) {
+    if let Some(at) = pairs.iter().position(|(v, _)| *v == value) {
+        field.set_selected(at as u32);
+    }
+}
 
 /// One labelled row. The label takes the space that every row shares, so the
 /// fields all start at the same place.
@@ -123,6 +165,8 @@ struct Fields {
     local: Entry,
     interval: SpinButton,
     debounce: SpinButton,
+    resolve: DropDown,
+    loser: DropDown,
     /// The extra rclone flags, separated by spaces.
     flags: Entry,
 }
@@ -136,6 +180,8 @@ impl Fields {
             local: self.local.text().to_string(),
             interval_secs: self.interval.value().max(0.0) as u64,
             debounce_secs: self.debounce.value().max(0.0) as u64,
+            conflict_resolve: chosen(&self.resolve, &RESOLVE),
+            conflict_loser: chosen(&self.loser, &LOSER),
             extra_flags: self
                 .flags
                 .text()
@@ -154,6 +200,8 @@ impl Fields {
         text(&self.local, &s.local);
         time(&self.interval, s.interval_secs);
         time(&self.debounce, s.debounce_secs);
+        select(&self.resolve, &RESOLVE, &s.conflict_resolve);
+        select(&self.loser, &LOSER, &s.conflict_loser);
         text(&self.flags, &s.extra_flags.join(" "));
     }
 }
@@ -288,23 +336,30 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     root.set_hide_on_close(true);
 
     // The values that the widgets and the reported copy start with. A fresh
-    // daemon writes these into the config file, so they match what a first
-    // open shows. Both sides must agree, or a Save with no edit sees a move.
-    let start = Settings {
-        remote: String::from("drive"),
-        local: String::from("~/Cloud"),
-        interval_secs: 900,
-        debounce_secs: 30,
-        extra_flags: Vec::new(),
-    };
+    // daemon writes the same defaults into the config file, so they match
+    // what a first open shows. Both sides must agree, or a Save with no edit
+    // sees a move.
+    let start = settings_of(&Config::default());
 
     let fields = Fields {
         remote: Entry::new(),
         local: Entry::new(),
         interval: seconds(start.interval_secs),
         debounce: seconds(start.debounce_secs),
+        resolve: choice(&RESOLVE),
+        loser: choice(&LOSER),
         flags: Entry::new(),
     };
+    // With Both no copy wins, so no copy loses and the loser row does
+    // nothing. rclone keeps both copies under new names.
+    let loser = fields.loser.clone();
+    fields.resolve.connect_selected_notify(move |resolve| {
+        loser.set_sensitive(chosen(resolve, &RESOLVE) != "none");
+    });
+    // The handler runs on a change only, so the first state needs a call.
+    fields.loser.set_sensitive(start.conflict_resolve != "none");
+    select(&fields.resolve, &RESOLVE, &start.conflict_resolve);
+    select(&fields.loser, &LOSER, &start.conflict_loser);
     text(&fields.remote, &start.remote);
     text(&fields.local, &start.local);
     // A placeholder shows only in an empty field. Adwaita dims it, but Breeze
@@ -404,6 +459,8 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     body.append(&hints[1].row("Local folder"));
     body.append(&hints[2].row("Interval in seconds"));
     body.append(&hints[3].row("Quiet time in seconds"));
+    body.append(&row("Copy to keep on conflict", &fields.resolve));
+    body.append(&row("Action for the losing copy", &fields.loser));
     body.append(&row("Extra rclone flags", &fields.flags));
     body.append(&error);
     body.append(&buttons);
@@ -455,8 +512,21 @@ mod tests {
             local: String::from(local),
             interval_secs: 900,
             debounce_secs: 30,
+            conflict_resolve: String::from("newer"),
+            conflict_loser: String::from("delete"),
             extra_flags: Vec::new(),
         }
+    }
+
+    // The dialog sends the value of a row, and the daemon refuses a value
+    // that is not in its own list.
+    #[test]
+    fn the_choices_match_the_daemon_lists() {
+        let values = |pairs: &[(&'static str, &str)]| -> Vec<&'static str> {
+            pairs.iter().map(|(v, _)| *v).collect()
+        };
+        assert_eq!(values(&RESOLVE), nimbusd::config::CONFLICT_RESOLVE);
+        assert_eq!(values(&LOSER), nimbusd::config::CONFLICT_LOSER);
     }
 
     // A save that moves nothing must not warn. A warning on every save trains

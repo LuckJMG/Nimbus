@@ -27,6 +27,25 @@ impl LocalDir {
     }
 }
 
+/// The values that rclone takes for `--conflict-resolve`. `none` keeps both
+/// copies, and the other values name the copy that wins.
+pub const CONFLICT_RESOLVE: [&str; 7] = [
+    "none", "newer", "older", "larger", "smaller", "path1", "path2",
+];
+
+/// The values that rclone takes for `--conflict-loser`. A live run on rclone
+/// 1.74.3 measured `delete`: it removes the losing copy for good, and with
+/// `none` there is no loser, so rclone keeps both copies.
+pub const CONFLICT_LOSER: [&str; 3] = ["num", "pathname", "delete"];
+
+fn newer() -> String {
+    String::from("newer")
+}
+
+fn delete() -> String {
+    String::from("delete")
+}
+
 /// The daemon reads this file at start.
 ///
 /// The struct refuses an unknown key. The daemon once read a folder in the
@@ -49,6 +68,14 @@ pub struct Config {
     /// The next run uses the rclone flag --resync. The flag clears only after
     /// a run that ends without an error.
     pub resync_pending: bool,
+    /// The copy that wins when a file changed on both sides. A file without
+    /// the key loads `newer`.
+    #[serde(default = "newer")]
+    pub conflict_resolve: String,
+    /// What happens to the copy that lost. A file without the key loads
+    /// `delete`.
+    #[serde(default = "delete")]
+    pub conflict_loser: String,
     /// More rclone flags for every run, for example `--drive-skip-shortcuts`.
     /// A file without the key loads an empty list.
     #[serde(default)]
@@ -64,6 +91,8 @@ impl Default for Config {
             interval_secs: 900,
             debounce_secs: 30,
             resync_pending: true,
+            conflict_resolve: newer(),
+            conflict_loser: delete(),
             extra_flags: Vec::new(),
         }
     }
@@ -100,6 +129,24 @@ impl Config {
                 String::from("debounce_secs must be above zero."),
             );
         }
+        if !CONFLICT_RESOLVE.contains(&self.conflict_resolve.as_str()) {
+            return refuse(
+                "conflict_resolve",
+                format!(
+                    "conflict_resolve must be one of {}.",
+                    CONFLICT_RESOLVE.join(", ")
+                ),
+            );
+        }
+        if !CONFLICT_LOSER.contains(&self.conflict_loser.as_str()) {
+            return refuse(
+                "conflict_loser",
+                format!(
+                    "conflict_loser must be one of {}.",
+                    CONFLICT_LOSER.join(", ")
+                ),
+            );
+        }
         let local = self.local.path();
         if !local.is_dir() {
             return refuse(
@@ -134,6 +181,8 @@ pub fn settings_of(cfg: &Config) -> Settings {
         local: cfg.local.text(),
         interval_secs: cfg.interval_secs,
         debounce_secs: cfg.debounce_secs,
+        conflict_resolve: cfg.conflict_resolve.clone(),
+        conflict_loser: cfg.conflict_loser.clone(),
         extra_flags: cfg.extra_flags.clone(),
     }
 }
@@ -156,6 +205,8 @@ pub fn apply_settings(cfg: &mut Config, s: &Settings) -> bool {
     cfg.local = local;
     cfg.interval_secs = s.interval_secs;
     cfg.debounce_secs = s.debounce_secs;
+    cfg.conflict_resolve = s.conflict_resolve.clone();
+    cfg.conflict_loser = s.conflict_loser.clone();
     cfg.extra_flags = s.extra_flags.clone();
     moved
 }
@@ -314,6 +365,8 @@ mod tests {
             interval_secs: 60,
             debounce_secs: 5,
             resync_pending: false,
+            conflict_resolve: String::from("path2"),
+            conflict_loser: String::from("num"),
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
         };
         save_to(&want, &file).expect("the daemon wrote the config file");
@@ -381,6 +434,8 @@ mod tests {
         .expect("the daemon wrote the config file");
         let cfg = load_from(&file).expect("the daemon read the older file");
         assert!(cfg.extra_flags.is_empty());
+        assert_eq!(cfg.conflict_resolve, "newer");
+        assert_eq!(cfg.conflict_loser, "delete");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -441,6 +496,20 @@ mod tests {
     }
 
     #[test]
+    fn check_rejects_an_unknown_conflict_value() {
+        let cfg = Config {
+            conflict_resolve: String::from("latest"),
+            ..Config::default()
+        };
+        assert_eq!(cfg.check().map_err(|i| i.key), Err("conflict_resolve"));
+        let cfg = Config {
+            conflict_loser: String::from("drop"),
+            ..Config::default()
+        };
+        assert_eq!(cfg.check().map_err(|i| i.key), Err("conflict_loser"));
+    }
+
+    #[test]
     fn check_rejects_a_missing_local_directory() {
         let cfg = Config {
             local: LocalDir::new(Path::new("/nimbus-no-such-directory")),
@@ -460,6 +529,8 @@ mod tests {
             local: String::from("/srv/notes"),
             interval_secs: 60,
             debounce_secs: 5,
+            conflict_resolve: String::from("path1"),
+            conflict_loser: String::from("pathname"),
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
         }
     }
@@ -474,6 +545,8 @@ mod tests {
             resync_pending: false,
             interval_secs: 60,
             debounce_secs: 5,
+            conflict_resolve: String::from("newer"),
+            conflict_loser: String::from("delete"),
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
         }
     }
@@ -493,6 +566,8 @@ mod tests {
         assert_eq!(cfg.local.text(), "/srv/notes");
         assert_eq!(cfg.interval_secs, 60);
         assert_eq!(cfg.debounce_secs, 5);
+        assert_eq!(cfg.conflict_resolve, "path1");
+        assert_eq!(cfg.conflict_loser, "pathname");
         assert_eq!(cfg.extra_flags, ["--drive-skip-shortcuts"]);
     }
 

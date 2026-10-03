@@ -31,8 +31,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 126 tests pass today: 3 in `nimbus-ipc`, 81 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 37 in `nimbus`.
+runs the same three. 129 tests pass today: 3 in `nimbus-ipc`, 83 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 38 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -266,9 +266,12 @@ attempt did not work.
 a failed resync therefore asks again. `--resync` follows `resync_pending` only,
 so the gate is the one place that decides.
 
-A file that changes on both sides during an outage does not lose data. rclone writes
-`name.conflict1` and `name.conflict2`, and both copies survive on both sides. A live
-run confirmed it.
+A file that changes on both sides during an outage loses the older edit by
+default. `conflict_resolve` is `newer` and `conflict_loser` is `delete`, so
+rclone deletes the losing copy. A live run on rclone 1.74.3 confirmed it. With
+`conflict_resolve = "none"`, rclone writes `name.conflict1` and
+`name.conflict2`, and both copies survive on both sides, even when
+`conflict_loser` is `delete`.
 
 ## The engine lock
 
@@ -297,13 +300,13 @@ dialog.
 
 Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 
-- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries four
+- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries six
   primitive keys. `Config` also holds `paused` and `resync_pending`, and a client
   that wrote either one would clear a flag that keeps rclone running.
 - `LocalDir` keeps a tilde for the file and drops it for rclone. The wire field
   is a plain `String`, so `LocalDir::path()` and `LocalDir::text()` are both
   needed, and the tilde must survive a save through the dialog.
-- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttas)`, and
+- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttssas)`, and
   `settings_signature_is_stable` holds it.
 - `Config` carries `deny_unknown_fields`, so a file from a build that read a
   `path` key stops the daemon with the line to delete. Serde ignores an unknown
@@ -344,7 +347,7 @@ The daemon side needs no click, so read it over the bus first:
 
 ```console
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttas" "" /tmp/scratch/local 60 3 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssas" "" /tmp/scratch/local 60 3 newer delete 0
 ```
 
 The second call must fail with "The remote is empty", and the config
@@ -354,7 +357,7 @@ Then move the folder and read the log. A save that leaves `local` alone must
 produce no new line, and a save that moves it must name the new folder:
 
 ```console
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttas" drive /tmp/scratch/local2 60 3 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssas" drive /tmp/scratch/local2 60 3 newer delete 0
 ```
 
 After that line, a file change in `/tmp/scratch/local2` must start a run, and a

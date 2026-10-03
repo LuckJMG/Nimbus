@@ -56,6 +56,10 @@ pub struct Settings {
     pub local: String,
     pub interval_secs: u64,
     pub debounce_secs: u64,
+    /// The value for `--conflict-resolve`, for example `newer`.
+    pub conflict_resolve: String,
+    /// The value for `--conflict-loser`, for example `delete`.
+    pub conflict_loser: String,
     /// More rclone flags for every run, one flag or value per item.
     pub extra_flags: Vec<String>,
 }
@@ -130,6 +134,6 @@ mod tests {
     /// every value into the wrong field at runtime.
     #[test]
     fn settings_signature_is_stable() {
-        assert_eq!(Settings::SIGNATURE, "(ssttas)");
+        assert_eq!(Settings::SIGNATURE, "(ssttssas)");
     }
 }
