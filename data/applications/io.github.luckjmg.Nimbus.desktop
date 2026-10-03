@@ -1,13 +1,13 @@
 [Desktop Entry]
 Type=Application
 Name=Nimbus
-GenericName=Google Drive sync
-Comment=Sync a local folder with Google Drive
+GenericName=Cloud sync
+Comment=Sync a local folder with an rclone remote
 Exec=/usr/bin/nimbus
-Icon=nimbus-sync-symbolic
+Icon=nimbus-idle-symbolic
 Terminal=false
 Categories=Network;FileTransfer;
-Keywords=drive;sync;backup;rclone;
+Keywords=cloud;drive;sync;backup;rclone;
 # The tray stays up after the window closes, so the shell gets no window to
 # wait for. A false value also leaves no spinning pointer when the start fails.
 StartupNotify=false

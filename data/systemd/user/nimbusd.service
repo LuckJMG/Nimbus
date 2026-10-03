@@ -1,5 +1,5 @@
 [Unit]
-Description=Nimbus Google Drive sync daemon
+Description=Nimbus rclone sync daemon
 Documentation=https://github.com/LuckJMG/Nimbus
 # The daemon needs no display. zbus finds the session bus through
 # XDG_RUNTIME_DIR, which a user manager always has, so the unit needs no

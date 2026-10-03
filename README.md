@@ -1,27 +1,66 @@
+<p align="center"><img src="docs/logo.svg" alt="The Nimbus logo" width="128"></p>
+
 # Nimbus
 
-Google Drive sync for Linux. A Rust daemon runs `rclone bisync` on a schedule
-and when files change. A GTK4 tray client shows the state and takes commands
-over D-Bus.
+Let it pour your files from the cloud. A linux native cloud sync tray.
+
+<https://github.com/LuckJMG/Nimbus>, maintained by LuckJMG.
+
+> **Disclaimer:** Nimbus is in alpha. AI generated 100% of this project. That
+> fact does not excuse its faults. Use Nimbus at your own risk. Any help to
+> improve it is welcome.
+
+## Project description
+
+Nimbus is a wrapper around [rclone](https://rclone.org/). With Nimbus, you can
+keep a local folder in sync with any rclone remote on Linux. Sync the whole
+remote, or one folder in it. A daemon runs `rclone bisync` on a schedule and
+after each file change. A tray icon shows the state and takes your commands.
+
+Nimbus helps you see the sync at a glance. The window shows the phase, the
+progress, the time since the last run, and the last error.
+
+Nimbus recovers from most rclone errors. A change of network, a lost
+connection, or a shutdown in the middle of a sync needs no action from you.
+Before the next run, the daemon repairs the record that rclone left behind,
+so the retry stays incremental. If the record cannot be repaired, Nimbus asks
+you for an explicit resync.
+
+Nimbus never starts a resync without your confirmation. A resync lets the
+local copy overwrite each remote copy that differs, so the window asks first.
+
+If a file changes on both sides, you choose what happens. By default, the
+newer edit wins and the older edit is deleted. With
+`conflict_resolve = "none"`, both copies stay, as `name.conflict1` and
+`name.conflict2`.
 
 ![The Nimbus window](docs/screenshot.png)
 
-The daemon owns the sync. It watches the local folder, keeps an interval, and
-serves one D-Bus interface. The tray owns the interface to the user. It shows
-the phase, the progress, the time since the last run, and the last error. It
-starts with no daemon and waits for one.
+Nimbus has two programs. The daemon, `nimbusd`, owns the sync. It watches the
+local folder, keeps an interval, and serves one D-Bus interface. The tray,
+`nimbus`, starts with no daemon and waits for one.
 
-## Requirements
+## Who this project is for
 
-Three floors, all of them real:
+This project is for Linux desktop users who want a cloud storage remote as
+a folder on disk. You must be able to set up an rclone remote and run commands
+in a terminal.
 
-| Floor | Version | Why |
-| --- | --- | --- |
-| Rust | 1.92 | The `gtk4` bindings declare it. The daemon alone needs 1.87, from `zbus`. |
-| GTK | 4.10 | The build enables the `v4_10` feature. |
-| rclone | 1.71 | rclone 1.71 promoted `bisync` from beta to stable. Before that the command does not exist in this form. |
+The project is also for developers who want to write their own client. Any
+program can read the state and send commands over D-Bus.
 
-The build needs the GTK4 development package. The runtime needs `rclone`.
+## Project dependencies
+
+Before you use Nimbus, make sure that you have:
+
+- An account on a storage service that rclone supports.
+- Rust 1.92 or later. The `gtk4` bindings declare it. The daemon alone needs 1.87, from `zbus`.
+- GTK 4.10 or later, with the development package. The build enables the `v4_10` feature.
+- rclone 1.71 or later. rclone 1.71 promoted `bisync` from beta to stable.
+- `just`, which runs the install recipes.
+- A systemd user session and a D-Bus session bus.
+
+The packages below are known to work:
 
 | Distribution | GTK4 | rclone | Builds |
 | --- | --- | --- | --- |
@@ -30,140 +69,207 @@ The build needs the GTK4 development package. The runtime needs `rclone`.
 | Debian 13 | `libgtk-4-dev` 4.18.6 | see below | yes |
 | Debian 12 | `libgtk-4-dev` 4.8.3 | see below | no, GTK is below 4.10 |
 
-Debian ships rclone 1.60.1, which predates stable `bisync`. Install a newer
-rclone from the rclone apt repository or from a static build before the first
-run.
+Debian ships rclone 1.60.1, which is older than stable `bisync`. Before the
+first run, install a newer rclone from the rclone apt repository or from a
+static build.
 
 ```console
-# Debian, after adding the rclone apt repository
+# Debian, after you add the rclone apt repository
 sudo apt install libgtk-4-dev rclone
 ```
 
-## Build
+## Instructions to use Nimbus
 
-```console
-git clone https://github.com/LuckJMG/Nimbus
-cd Nimbus
-cargo build --release
-```
+To start, create a remote in rclone. Then build and install
+Nimbus, and set the folder to sync.
 
-## Install
+### Install Nimbus
 
-The `justfile` holds the recipe, and it is the only copy of the file list.
+1. Create a remote in rclone. Name it `drive`, because that is the default
+   name in Nimbus. A different name works too, if you set it in the config.
 
-```console
-just install            # into /usr, needs root
-just install-user       # into your home directory, needs no root
-```
+    ```console
+    rclone config
+    ```
 
-Read the `justfile` for what each recipe installs and where. `install-user`
-rewrites the absolute paths in the unit and the service file, so read the paths
-it prints. A home directory install also needs an icon cache rebuild, which the
-Troubleshooting section covers.
+2. Clone the repository and build the two programs.
 
-The two programs start in two different ways. The daemon runs as a systemd user
-unit, because it needs no display and because a restart policy matters. The tray
-starts from the autostart entry, because the login session owns `WAYLAND_DISPLAY`
-and a systemd user unit does not. The autostart entry takes effect at the next
-login. The entry passes `--hidden`, so a login starts the tray icon and no
-window. A start from the app menu opens the window. `just run-tray` starts the tray now instead, and it finds the installed
-binary after either install.
+    ```console
+    git clone https://github.com/LuckJMG/Nimbus
+    cd Nimbus
+    cargo build --release
+    ```
 
-## Configure
+3. Install Nimbus with one of the two recipes.
 
-Give rclone a Google Drive remote first. The name below is `drive`, which is
-also the default.
+    ```console
+    just install            # into /usr, needs root
+    just install-user       # into your home directory, needs no root
+    ```
 
-```console
-rclone config
-```
+    Both recipes enable the daemon as a systemd user unit and start it. The
+    `justfile` lists each file and where it goes.
 
-The daemon reads one file. It writes the file with the default settings on the
-first start, so start the daemon once, then edit the file and start it again.
-The Settings dialog of the tray writes the same file while the daemon runs.
+4. If you used `just install-user`, read the paths that the recipe prints.
 
-```
-~/.config/nimbus/config.toml
-```
+    The recipe rewrites the absolute paths in the unit and the service file.
+    A home directory install also needs an icon cache rebuild. See
+    [Troubleshoot Nimbus](#troubleshoot-nimbus).
+
+5. Start the tray now, or log in again.
+
+    ```console
+    just run-tray
+    ```
+
+    The recipe finds the installed binary after either install.
+
+The two programs start in two ways. The daemon runs as a systemd user unit,
+because it needs no display and a restart policy matters. The tray starts from
+the autostart entry, because the login session owns `WAYLAND_DISPLAY`.
+
+The autostart entry passes `--hidden`, so a login starts the tray icon and no
+window. A start from the app menu opens the window.
+
+### Configure Nimbus
+
+The daemon reads one file, `~/.config/nimbus/config.toml`. On the first start,
+it writes the file with the default settings. While the daemon runs, it is the
+only program that writes the file.
+
+1. Create the local folder. The daemon refuses a folder that does not exist.
+2. Open the window, and then click Settings.
+3. In Remote path, type the name of your rclone remote. To sync one folder only,
+   add the folder, as in `drive:/Documents`.
+4. In Local folder, type the path of the folder.
+5. Click Save. If the dialog asks about a move of the sync, click to confirm.
+6. If the window shows Start daemon, click it.
+7. In the window, click Resync, and then confirm. The first run of a new
+   config is a resync.
+
+The dialog works when the daemon does not run. It then reads and writes the
+config file itself, and the daemon reads the file on its next start.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remote` | `drive` | The rclone remote name. The name comes from your rclone config. The daemon syncs the root of it, written `drive:/`. |
+| `remote` | `drive` | The rclone remote, from your rclone config. A bare name, as in `drive`, syncs the whole remote. A name with a folder, as in `drive:/Documents`, syncs that folder only. |
 | `local` | `~/Cloud` | The local folder. The daemon watches this folder. |
 | `paused` | `false` | A run that is active finishes. Later runs wait for a resume. |
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
 | `resync_pending` | `true` | The next run uses the rclone flag `--resync`, after you confirm it. The flag clears only after a run that ends without an error. |
 | `conflict_resolve` | `newer` | The copy that wins when a file changed on both sides: `none`, `newer`, `older`, `larger`, `smaller`, `path1` (local), or `path2` (remote). `none` keeps both copies. |
-| `conflict_loser` | `delete` | What happens to the copy that lost: `num` renames it with the next free number, as in `name.conflict1`. `pathname` renames it with the number of its origin: `name.conflict1` is local and `name.conflict2` is remote. `delete` removes it for good. With `none`, no copy loses, so rclone keeps both. |
-| `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]`. |
+| `conflict_loser` | `delete` | What happens to the copy that lost. `num` renames it with the next free number, as in `name.conflict1`. `pathname` renames it with the number of its origin: `name.conflict1` is local and `name.conflict2` is remote. `delete` removes it for good. With `none`, no copy loses, so rclone keeps both. |
+| `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]` for a Google Drive remote. |
 
-The daemon syncs the root of the remote, so the whole drive is the target. A
-build before this one read a `path` key and synced one folder inside the remote.
-The daemon now refuses a config file that still carries `path` and prints the
-line to delete, so an upgrade never moves to a different set of files by
-accident.
+Nimbus passes a `remote` with a colon to rclone unchanged. On a `local`
+remote, `name:path` and `name:/path` are different folders, so write the
+folder the way rclone expects it.
 
-The daemon also keeps its record of your files in `bisync/`, beside the config file.
-Do not delete that directory while the daemon runs. A lost connection leaves the
-record unusable, and the daemon restores it before the next run.
+An older build read a separate `path` key. The daemon refuses a config file
+that still holds `path`, and it prints the line to delete. To keep the same
+folder, add it to `remote`, as in `drive:/Documents`. So an upgrade never
+moves to a different set of files.
 
-A run starts when any one of these is true:
+The daemon keeps its record of your files in `bisync/`, next to the config
+file.
+
+> Do not delete the `bisync/` directory while the daemon runs. The daemon
+> needs the record to keep each run incremental.
+
+A run starts when one of these conditions is true:
 
 - The last file change is at least `debounce_secs` old.
 - The last run finished at least `interval_secs` ago.
 - You asked for a run with Sync now.
-- No run has ever finished.
+- No run has finished yet.
 
-The daemon watches only the local folder. A change that arrives from another
-machine waits for the next interval.
+The daemon watches only the local folder. A change from another machine
+arrives on the next interval.
 
-A lost connection does not need a manual fix. The daemon keeps a record of what
-both sides agreed on, and it restores that record before the next run, so the retry
-stays incremental. Only a crash that left no record at all needs a full resync.
+A lost connection needs no manual fix. The daemon keeps a record of what both
+sides agreed on. It restores that record before the next run, so the retry
+stays incremental. Only a crash that left no record needs a full resync.
 
 A resync compares every file on both sides. Where a file differs, the local
-copy replaces the remote copy. So the daemon never runs one on its own. The
-window says "A resync is needed" and shows a Resync button, and the resync
-starts after you confirm it. The first run of a new config is a resync too.
+copy replaces the remote copy. So the daemon never starts one on its own. The
+window says "A resync is needed" and shows a Resync button. The resync starts
+after you confirm it.
 
-## Use
+### Run Nimbus
 
 The tray icon sits in the panel. A left click opens the window. A right click
-opens the menu. On Wayland, a left click brings the window to the front only when
-the window is closed. A window that is already open keeps its place, because the
-compositor refuses a raise without a click of its own. The taskbar entry flashes
-instead.
+opens the menu.
+
+On Wayland, a left click brings the window to the front only when the window
+is closed. A window that is open keeps its place, because the compositor
+refuses a raise without a click of its own. The taskbar entry flashes instead.
+
+The window shows the phase, the progress, the time since the last run, and
+the last error. Each button shows only when it applies.
+
+| Button | What it does |
+| --- | --- |
+| Sync now | Starts a run. The call returns before the run finishes. |
+| Resync | Shows in the `resync` phase only, in place of Sync now. Asks you to confirm, and then starts a resync. |
+| Pause | Skips later runs. A run that is active finishes first. The button reads Resume while Nimbus is paused. |
+| Start daemon | Shows only when the daemon does not run, in place of Sync now and Pause. Starts the systemd unit. |
+| Settings | Opens the Settings dialog. |
+
+The menu has the same commands:
 
 | Item | What it does |
 | --- | --- |
-| The first row | The phase and the last error. The row is not a command. |
-| Sync now | Starts a run. The call returns before the run finishes. |
-| Pause | Skips later runs. A run that is active finishes first. |
-| Settings | Opens the dialog for the keys in the table above. |
-| Quit | Stops the tray. The daemon keeps running. |
+| The first row | The phase. The row is not a command. |
+| Sync now | Starts a run. The item is disabled while a run is active. |
+| Pause | A checkmark item. A tick shows that Nimbus is paused. Click it to pause or resume. |
+| Settings | Opens the Settings dialog. |
+| Quit | Stops the tray. The daemon continues to run. |
 
-The Settings row opens a dialog for `remote`, `local`, `interval_secs`,
-`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The dialog takes the flags as one line,
-separated by spaces. The daemon takes the new keys at once and writes the file.
-A time above 86400 needs the file, because the dialog stops at one day.
+The Settings dialog edits seven keys of the config file:
 
-When the daemon is not running, the dialog reads and writes the config file
-itself, so a save keeps your edit. The daemon reads it on its next start.
+| Field | Key |
+| --- | --- |
+| Remote path | `remote` |
+| Local folder | `local` |
+| Interval in seconds | `interval_secs` |
+| Quiet time in seconds | `debounce_secs` |
+| Copy to keep on conflict | `conflict_resolve` |
+| Action for the losing copy | `conflict_loser` |
+| Extra rclone flags | `extra_flags` |
 
-The Open config file button opens the file in the editor that the desktop
-picks for it. Stop the daemon before you edit the file. A running daemon does
-not read the file again, and it writes the file on every pause, so a later
-pause overwrites your edit. Use the Start daemon button in the window after the
-edit.
+Type the flags on one line, with spaces between them. The two times stop at
+86400, one day. A larger value needs the file. Pause and the resync flag have
+no field, because the window and the menu control them.
+
+The dialog checks the keys before Save sends them. If a key is wrong, the
+reason shows under its field. The daemon checks the keys again and takes them
+at once.
 
 A moved `remote` or `local` has no bisync listing, so the next run is a full
 resync. The dialog asks before it saves the move. The window then asks for the
 resync, as for every other resync.
 
-## The D-Bus API
+To edit the config file by hand:
 
-Any client can read the state and send the same commands.
+1. Stop the daemon.
+
+    ```console
+    systemctl --user stop nimbusd.service
+    ```
+
+2. In the Settings dialog, click Open config file. The file opens in the
+   editor that the desktop picks.
+3. Save your edit.
+4. In the window, click Start daemon.
+
+> Stop the daemon before you edit the file. A daemon that runs does not read the
+> file again. It writes the file on every pause, so a later pause overwrites
+> your edit.
+
+### Control Nimbus over D-Bus
+
+Any client can read the state and send the same commands as the tray.
 
 | | |
 | --- | --- |
@@ -174,12 +280,15 @@ Any client can read the state and send the same commands.
 | Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttssas)`, `Resync` |
 | Signal | `Changed(State)` |
 
-The four values of the signature are the phase as a string, the progress as a
-double, the time of the last finished run as a Unix timestamp, and the last
-error as a string. The phase is one of `idle`, `syncing`, `paused`, `error`, or
-`resync`. In `resync`, the daemon waits until a client calls `Resync`, and the
-error string holds the reason for the resync.
-The progress runs from 0.0 to 1.0 and is zero while the daemon is idle.
+The `State` signature holds four values:
+
+- The phase, as a string. The phase is `idle`, `syncing`, `paused`, `error`, or `resync`.
+- The progress, as a double from 0.0 to 1.0. It is zero while the daemon is idle.
+- The time of the last finished run, as a Unix timestamp.
+- The last error, as a string.
+
+In the `resync` phase, the daemon waits until a client calls `Resync`. The
+error string then holds the reason for the resync.
 
 ```console
 busctl --user get-property io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 State
@@ -191,85 +300,107 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 ```
 
 The values of `ssttssas` are `remote`, `local`, `interval_secs`,
-`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the problem, for example:
+`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The
+`0` sends an empty list of flags. A refusal names the problem, for example:
 
 ```console
 Call failed: The remote is empty. Set it to an rclone remote name, for example drive.
 ```
 
-`busctl --user monitor` does not filter by name. Watch the signal with:
+`busctl --user monitor` does not filter by name. To watch the signal, use
+`dbus-monitor`:
 
 ```console
 dbus-monitor --session "type='signal',interface='io.github.luckjmg.nimbus1'"
 ```
 
 If you write a client in Rust, set `cache_properties(CacheProperties::No)` on
-the proxy. A proxy caches properties and refreshes the cache only on the
-standard `PropertiesChanged` signal, which the daemon does not send. A cached
-proxy reports a stale state forever.
+the proxy. A proxy refreshes its cache only on the standard
+`PropertiesChanged` signal, and the daemon does not send it. A cached proxy
+reports a stale state forever.
 
-## Troubleshooting
+### Troubleshoot Nimbus
 
-**The tray says "The daemon is not running".** The unit is not running. Run
-`systemctl --user status nimbusd.service` and read `journalctl --user -u
-nimbusd.service`. A bad config makes the daemon stop on purpose, so the unit
-shows as inactive rather than restarting. The window shows the reason below
-the heading, and a Start daemon button starts the unit again. The daemon also shows the reason as a desktop notification titled
-"Nimbus did not start". If Do Not Disturb is on,
-the notification is in the notification history.
+1. Read the line below the heading in the window. It names the last error.
+2. Read the daemon log.
 
-**The daemon says "another daemon already holds io.github.luckjmg.nimbus".**
-Two daemons are running. Only one can own the name. Stop the other one, then
-start this one again. A second daemon exits with zero, because only you can free
-the name.
+    ```console
+    systemctl --user status nimbusd.service
+    journalctl --user -u nimbusd.service
+    ```
 
-**rclone says "Bisync aborted. Must run --resync to recover."** A lost connection
-left rclone without a usable record of your files. The daemon repairs this by
-itself before the next run, so the retry is incremental and no action is needed.
+3. Find the issue in the table below.
 
-If nothing survives to restore, the window says "A resync is needed". Press
-Resync and confirm. The cost is one full pass over both sides.
+The window shows each message below the heading. When the daemon refuses to
+start, the heading reads "The daemon is not running". The daemon then also
+sends a desktop notification, "Nimbus did not start". If Do Not Disturb is on,
+look in the notification history.
 
-A failed run waits for `interval_secs` before it retries, because there is no
-separate retry timer. Set `interval_secs` to something like `300` if the connection
-is often down, so a blip costs you five minutes instead of fifteen.
+A bad config stops the daemon on purpose. The unit stays inactive and does not
+restart, because only you can fix the config. After the fix, click Start
+daemon in the window.
 
-**The first run fails on a test remote.** The destination folder must exist
-before the first run. Google Drive creates folders, so this affects test
-remotes only. A remote of the type `alias` with an absolute path is the only
-test remote that resolves the same way from any working directory.
+| Message | Solution |
+| --- | --- |
+| The folder … does not exist. | Create the folder. Or, in the Settings dialog, set Local folder to a folder that exists. |
+| The remote is empty. Set it to an rclone remote name, for example drive. | In the Settings dialog, set Remote path to the name of a remote from `rclone config`. |
+| `interval_secs` must be above zero. | Set the interval to 1 or more. The same solution applies to `debounce_secs`. |
+| `conflict_resolve` must be one of … | Set the key to one of the values that the message names. The same solution applies to `conflict_loser`. |
+| The config key path is obsolete. Delete it. | Click Open config file in the Settings dialog, and then delete the `path` line. |
+| Invalid config: … | The config file is not valid TOML, or a key has a wrong type. Click Open config file, and then fix the line that the message names. |
+| nimbusd: another daemon already holds io.github.luckjmg.nimbus | This line is in the daemon log. Two daemons run, and only one can own the name. Stop the other daemon, and then start this one again. |
 
-**The tray shows a blank icon.** A host looks an icon name up in its own cache,
-and the cache does not know an icon that was installed after the last rebuild.
-Nimbus sends the installed directory in `IconThemePath`, so the host can find the
-theme. Some hosts still need their own cache rebuilt:
+In the `resync` phase, the heading reads "A resync is needed". The line below
+it gives one of three reasons. For each reason, click Resync and confirm. The
+cost is one full pass over both sides.
+
+| Reason | Cause |
+| --- | --- |
+| Nimbus has no record of a sync between this folder and the remote. | No sync between the two sides finished yet. A new config always starts here. A restart also shows this reason, because the daemon forgets the cause. |
+| The folder or the remote changed, so Nimbus has no record of a sync between them. | You moved `local` or `remote`. rclone names its record after the pair of paths. |
+| The last sync stopped before it saved its record of the files. | A run stopped, for example on a lost connection, before rclone wrote any record. The daemon repairs every other lost connection without a resync. |
+
+Other issues:
+
+| Issue | Solution |
+| --- | --- |
+| The heading reads "Error". | Read the rclone message below the heading, and the daemon log. The daemon tries again on the next interval. |
+| A failed run takes a long time to retry. | A failed run waits for `interval_secs`, because there is no separate retry timer. If the connection is often down, set `interval_secs` to a low value, for example `300`. |
+| A run on a test remote fails with "directory not found". | Create the destination folder before the first run. Some remotes, for example Google Drive, create the folder themselves. Use an `alias` remote with an absolute path. It is the only test remote that resolves the same way from any working directory. |
+| The tray shows a blank icon. | Rebuild the icon cache. See the commands below the table. |
+
+A host looks up an icon name in its own cache. The cache does not know an icon
+that you installed after the last rebuild. Nimbus sends the installed
+directory in `IconThemePath`, but some hosts still need a cache rebuild:
 
 ```console
 gtk4-update-icon-cache -f -t ~/.local/share/icons/hicolor
 kiconcache6 -f ~/.local/share/icons        # KDE, the tool is called kiconcache5 on older releases
 ```
 
-A package install into `/usr/share/icons` normally needs neither command, because
-the distribution builds the cache for that directory. A `just install-user`
-install into your home directory is the case that needs one.
+A `just install` into `/usr/share/icons` usually needs neither command,
+because the distribution builds the cache for that directory. A
+`just install-user` into your home directory needs one.
 
-## Uninstall
+### Uninstall Nimbus
 
-`just uninstall` removes the files that `just install` added, and it needs root.
-`just uninstall-user` removes the files that `just install-user` added, and it
-needs no root.
+1. Run the recipe that matches your install.
 
-```console
-sudo just uninstall
-just uninstall-user
-```
+    ```console
+    just uninstall          # after just install, needs root
+    just uninstall-user     # after just install-user, needs no root
+    ```
 
-The config file and the rclone remote stay, because both hold settings that you
-wrote. Remove `~/.config/nimbus/` by hand if you want them gone. That directory
-holds the config file and the `bisync/` record, so a fresh install starts with no
-record and rebuilds it on the first run.
+2. If you want to remove your settings too, delete `~/.config/nimbus/`.
 
-## Development
+    The recipes keep the config file and the rclone remote, because both hold
+    settings that you wrote. The directory also holds the `bisync/` record. A
+    fresh install then starts with no record and rebuilds it on the first run.
+
+## Contributing guidelines
+
+Run the three checks before every commit, in this order. No CI runs them.
+`just check` runs the same three.
 
 ```console
 cargo fmt --all --check
@@ -277,18 +408,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No CI runs these three. Run all of them before every commit, in that order.
-`just check` runs the same three.
-
 The unit tests do not cover the bus, the watcher, the panel, or rclone. Those
-need a live run, and `AGENTS.md` holds the procedure together with the traps
-that a live run found. That file also holds the crash test for the listing repair,
-which no unit test can cover.
+need a live run. `AGENTS.md` holds the procedure for the live run and the
+traps that live runs found. It also holds the crash test for the listing
+repair, which no unit test can cover.
 
 `just sandbox` builds both binaries and runs them against a local folder that
-stands in for the remote, so a run never reaches Google Drive. The recipe stops
-while a daemon already holds the bus name, because one daemon owns
-`io.github.luckjmg.nimbus` in a session. `just sandbox-stop` ends the daemon
+stands in for the remote. So a run never reaches a real remote. The recipe stops
+while a daemon holds the bus name, because one daemon owns
+`io.github.luckjmg.nimbus` in a session. `just sandbox-stop` stops the daemon
 that the recipe started.
 
 | Crate | Role |
@@ -297,6 +425,22 @@ that the recipe started.
 | `nimbusd` | The daemon. Library plus binary. |
 | `nimbus` | The tray. One binary: the window, the icon, and the menu. |
 
-## License
+Write commit messages as Conventional Commits. Use the crate name as the
+scope, for example `feat(daemon): add the watcher and the engine loop`.
 
-MIT. See [LICENSE](LICENSE).
+## Additional documentation
+
+For more information:
+
+- [`AGENTS.md`](AGENTS.md): the live check, the crash test, the design limits, and the traps in zbus, GTK, and rclone.
+- [`justfile`](justfile): every build, install, and sandbox recipe, and the only list of installed files.
+- [rclone bisync](https://rclone.org/bisync/): the rclone command that Nimbus runs.
+
+## How to get help
+
+- [GitHub issues](https://github.com/LuckJMG/Nimbus/issues): report a bug or ask a question. Attach the output of `journalctl --user -u nimbusd.service`.
+- [Troubleshoot Nimbus](#troubleshoot-nimbus): the known issues and their solutions.
+
+## Terms of use
+
+Nimbus is licensed under the [MIT License](LICENSE).
