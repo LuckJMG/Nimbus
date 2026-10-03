@@ -20,6 +20,13 @@ env:
 permissions:
   contents: read
 
+# A container job runs each step with `/bin/sh`, and that is dash on Debian. The
+# version substitutions below are bash, so the shell is named here instead of
+# being taken from the image.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # One cargo build for all three packages. The tarball holds the binaries, the
   # data files, the license, and the readme, so the package jobs need the repo

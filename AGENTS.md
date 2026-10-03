@@ -580,6 +580,11 @@ touching the workflow.
   `pkgver`, and it names the source with the `name::url` form. The workflow
   writes the tag form and the workflow puts the tarball next to the PKGBUILD,
   so makepkg reads the file and never fetches the URL.
+- A container job runs each step with `/bin/sh`, which is dash on Debian and
+  bash on Fedora and Arch. `${version/-/\~}` is bash only, so the workflow sets
+  `defaults.run.shell: bash`. Without it, the deb job fails with "Bad
+  substitution" and the other two pass, which looks like a bug in the deb
+  branch.
 - `actions/checkout` needs `git`, and none of the three base images has it. Each
   package job installs it.
 - `${version/-/~}` reads the tilde as the home directory of the user on bash
