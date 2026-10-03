@@ -152,19 +152,14 @@ fn notify_refusal(body: &str) {
 fn main() -> Result<()> {
     // A config that does not parse is a bad config too, so it takes the same
     // clean refusal as one that fails the check.
-    let cfg = match config::load().and_then(|cfg| cfg.check().map(|()| cfg)) {
+    let cfg = match config::load().and_then(|cfg| Ok(cfg.check().map(|()| cfg)?)) {
         Ok(cfg) => cfg,
         Err(err) => {
-            eprintln!("nimbusd: {err}");
-            eprintln!(
-                "nimbusd: the config file is {}",
-                config::default_file().display()
-            );
-            eprintln!("nimbusd: fix the settings, then start the daemon again");
-            notify_refusal(&format!(
-                "{err}\n\nThe config file is {}. Fix it, then run: systemctl --user restart nimbusd",
-                config::default_file().display()
-            ));
+            let text = format!("{err:#}");
+            for line in text.lines() {
+                eprintln!("nimbusd: {line}");
+            }
+            notify_refusal(&text);
             // A clean refusal exits with zero. Only the user can fix the
             // settings, so a restart would fail in the same way and fill the
             // journal.

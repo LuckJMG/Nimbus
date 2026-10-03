@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use nimbus_ipc::Settings;
 use serde::{Deserialize, Serialize};
 
@@ -58,8 +58,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            remote: String::from("gdrive"),
-            local: LocalDir::new(Path::new("~/Nimbus")),
+            remote: String::from("drive"),
+            local: LocalDir::new(Path::new("~/Cloud")),
             paused: false,
             interval_secs: 900,
             debounce_secs: 30,
@@ -78,28 +78,54 @@ impl Config {
 
     /// Rejects settings that the daemon cannot use. The function returns the
     /// first error.
-    pub fn check(&self) -> Result<()> {
-        ensure!(
-            !self.remote.is_empty(),
-            "the config key remote is empty. Set a remote name."
-        );
-        ensure!(
-            self.interval_secs > 0,
-            "the config key interval_secs is zero. Set a time above zero."
-        );
-        ensure!(
-            self.debounce_secs > 0,
-            "the config key debounce_secs is zero. Set a time above zero."
-        );
+    pub fn check(&self) -> Result<(), Invalid> {
+        let refuse = |key, reason: String| Err(Invalid { key, reason });
+        if self.remote.is_empty() {
+            return refuse(
+                "remote",
+                String::from(
+                    "The remote is empty. Set it to an rclone remote name, for example drive.",
+                ),
+            );
+        }
+        if self.interval_secs == 0 {
+            return refuse(
+                "interval_secs",
+                String::from("interval_secs must be above zero."),
+            );
+        }
+        if self.debounce_secs == 0 {
+            return refuse(
+                "debounce_secs",
+                String::from("debounce_secs must be above zero."),
+            );
+        }
         let local = self.local.path();
-        ensure!(
-            local.is_dir(),
-            "the local directory {} does not exist. Create the directory, or set the config key local to a directory that exists.",
-            local.display()
-        );
+        if !local.is_dir() {
+            return refuse(
+                "local",
+                format!("The folder {} does not exist.", local.display()),
+            );
+        }
         Ok(())
     }
 }
+
+/// A key that `check` refuses. The key lets the settings dialog show the
+/// reason under the field that holds the key.
+#[derive(Debug)]
+pub struct Invalid {
+    pub key: &'static str,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for Invalid {}
 
 /// Reads the keys that a client may change out of the config.
 pub fn settings_of(cfg: &Config) -> Settings {
@@ -119,7 +145,8 @@ pub fn settings_of(cfg: &Config) -> Settings {
 /// moved remote or folder has no listing and the flag must go up. The
 /// comparison uses the folder that rclone opens, because a text change that
 /// keeps the folder must not cost a resync.
-pub fn apply_settings(cfg: &mut Config, s: &Settings) {
+/// Returns true when the remote or the folder moved.
+pub fn apply_settings(cfg: &mut Config, s: &Settings) -> bool {
     let local = LocalDir::new(Path::new(&s.local));
     let moved = cfg.remote != s.remote || cfg.local.path() != local.path();
     if moved {
@@ -130,6 +157,7 @@ pub fn apply_settings(cfg: &mut Config, s: &Settings) {
     cfg.interval_secs = s.interval_secs;
     cfg.debounce_secs = s.debounce_secs;
     cfg.extra_flags = s.extra_flags.clone();
+    moved
 }
 
 /// A test passes a temporary directory.
@@ -164,19 +192,16 @@ fn load_from(file: &Path) -> Result<Config> {
         save_to(&cfg, file)?;
         return Ok(cfg);
     }
-    let text = std::fs::read_to_string(file)
-        .with_context(|| format!("the daemon cannot read {}", file.display()))?;
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("Cannot read {}", file.display()))?;
     match toml::from_str::<Config>(&text) {
         Ok(cfg) => Ok(cfg),
         // A config from an older build carries a key that this build removed,
         // and the default error text only says that a field is missing. The
         // user cannot act on that, so the text names what to do.
         Err(err) => Err(match removed_key(&text) {
-            Some(key) => anyhow::anyhow!(
-                "the config key {key} was removed. The daemon syncs the whole remote now. Delete the line {key} from {}, then start the daemon again",
-                file.display()
-            ),
-            None => anyhow::anyhow!("the daemon cannot parse {}: {err}", file.display()),
+            Some(key) => anyhow::anyhow!("The config key {key} is obsolete. Delete it."),
+            None => anyhow::anyhow!("Invalid config: {err}"),
         }),
     }
 }
@@ -270,7 +295,7 @@ mod tests {
         let got = load_from(&file).expect("the daemon read the config file");
         let on_disk = std::fs::read_to_string(&file).expect("the daemon read the config file");
         assert!(
-            on_disk.contains("~/Nimbus"),
+            on_disk.contains("~/Cloud"),
             "the file keeps the tilde for the user"
         );
         assert_eq!(got.local, cfg.local, "the loaded value is the raw text");
@@ -310,7 +335,7 @@ mod tests {
     #[test]
     fn a_new_config_targets_the_root_of_the_remote() {
         let cfg = Config::default();
-        assert_eq!(cfg.remote_path(), "gdrive:/");
+        assert_eq!(cfg.remote_path(), "drive:/");
     }
 
     // A removed key must stop the daemon with words the user can act on. A
@@ -331,11 +356,11 @@ mod tests {
         let err = load_from(&file).expect_err("the daemon must refuse the old key");
         let text = format!("{err:#}");
         assert!(
-            text.contains("path") && text.contains("removed"),
+            text.contains("path") && text.contains("obsolete"),
             "the message names the key and what happened: {text}"
         );
         assert!(
-            text.contains("Delete the line path"),
+            text.contains("Delete it"),
             "the message tells the user what to do: {text}"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -382,7 +407,11 @@ mod tests {
             remote: String::new(),
             ..Config::default()
         };
-        assert!(cfg.check().is_err(), "an empty remote is not usable");
+        assert_eq!(
+            cfg.check().map_err(|i| i.key),
+            Err("remote"),
+            "an empty remote is not usable"
+        );
     }
 
     #[test]
@@ -391,8 +420,9 @@ mod tests {
             interval_secs: 0,
             ..Config::default()
         };
-        assert!(
-            cfg.check().is_err(),
+        assert_eq!(
+            cfg.check().map_err(|i| i.key),
+            Err("interval_secs"),
             "a zero interval starts runs without a pause"
         );
     }
@@ -403,8 +433,9 @@ mod tests {
             debounce_secs: 0,
             ..Config::default()
         };
-        assert!(
-            cfg.check().is_err(),
+        assert_eq!(
+            cfg.check().map_err(|i| i.key),
+            Err("debounce_secs"),
             "a zero debounce starts a run for every file change"
         );
     }
@@ -415,8 +446,10 @@ mod tests {
             local: LocalDir::new(Path::new("/nimbus-no-such-directory")),
             ..Config::default()
         };
-        assert!(
-            cfg.check().is_err(),
+        // The settings dialog shows the reason under the field with this key.
+        assert_eq!(
+            cfg.check().map_err(|i| i.key),
+            Err("local"),
             "rclone copies nothing without a local directory"
         );
     }

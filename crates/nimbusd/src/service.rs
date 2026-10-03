@@ -36,6 +36,10 @@ impl NimbusService {
         config::settings_of(self.engine.lock().expect("the engine lock").config())
     }
 
+    fn resync(&self) -> zbus::fdo::Result<()> {
+        self.send(Event::Resync)
+    }
+
     /// Rejects the keys before the engine sees them.
     ///
     /// The check runs on a copy, because the engine holds the only live

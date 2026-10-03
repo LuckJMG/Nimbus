@@ -796,6 +796,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "nimbus-ipc",
+ "nimbusd",
  "zbus",
 ]
 

@@ -71,7 +71,7 @@ binary after either install.
 
 ## Configure
 
-Give rclone a Google Drive remote first. The name below is `gdrive`, which is
+Give rclone a Google Drive remote first. The name below is `drive`, which is
 also the default.
 
 ```console
@@ -88,12 +88,12 @@ The Settings dialog of the tray writes the same file while the daemon runs.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remote` | `gdrive` | The rclone remote name. The name comes from your rclone config. The daemon syncs the root of it, written `gdrive:/`. |
-| `local` | `~/Nimbus` | The local folder. The daemon watches this folder. |
+| `remote` | `drive` | The rclone remote name. The name comes from your rclone config. The daemon syncs the root of it, written `drive:/`. |
+| `local` | `~/Cloud` | The local folder. The daemon watches this folder. |
 | `paused` | `false` | A run that is active finishes. Later runs wait for a resume. |
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
-| `resync_pending` | `true` | The next run uses the rclone flag `--resync`. The flag clears only after a run that ends without an error. |
+| `resync_pending` | `true` | The next run uses the rclone flag `--resync`, after you confirm it. The flag clears only after a run that ends without an error. |
 | `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]`. |
 
 The daemon syncs the root of the remote, so the whole drive is the target. A
@@ -118,8 +118,12 @@ machine waits for the next interval.
 
 A lost connection does not need a manual fix. The daemon keeps a record of what
 both sides agreed on, and it restores that record before the next run, so the retry
-stays incremental. Only a crash that left no record at all costs one full resync.
-The Troubleshooting section covers that case.
+stays incremental. Only a crash that left no record at all needs a full resync.
+
+A resync compares every file on both sides. Where a file differs, the local
+copy replaces the remote copy. So the daemon never runs one on its own. The
+window says "A resync is needed" and shows a Resync button, and the resync
+starts after you confirm it. The first run of a new config is a resync too.
 
 ## Use
 
@@ -142,9 +146,15 @@ The Settings row opens a dialog for `remote`, `local`, `interval_secs`,
 separated by spaces. The daemon takes the new keys at once and writes the file.
 A time above 86400 needs the file, because the dialog stops at one day.
 
-A moved `remote` or `local` has no bisync listing, so the daemon sets
-`resync_pending` and the next run carries `--resync`. One full pass over both
-sides follows.
+The Open config file button opens the file in the editor that the desktop
+picks for it. Stop the daemon before you edit the file. A running daemon does
+not read the file again, and it writes the file on every pause, so a later
+pause overwrites your edit. Use the Start daemon button in the window after the
+edit.
+
+A moved `remote` or `local` has no bisync listing, so the next run is a full
+resync. The dialog asks before the save, and the "Save and resync" button
+confirms the resync.
 
 ## The D-Bus API
 
@@ -156,12 +166,14 @@ Any client can read the state and send the same commands.
 | Object path | `/io/github/luckjmg/nimbus` |
 | Interface | `io.github.luckjmg.nimbus1` |
 | Property | `State`, signature `(sdts)` |
-| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(sstt)` |
+| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttas)`, `Resync` |
 | Signal | `Changed(State)` |
 
 The four values of the signature are the phase as a string, the progress as a
 double, the time of the last finished run as a Unix timestamp, and the last
-error as a string. The phase is one of `idle`, `syncing`, `paused`, or `error`.
+error as a string. The phase is one of `idle`, `syncing`, `paused`, `error`, or
+`resync`. In `resync`, the daemon waits until a client calls `Resync`. A
+`SetSettings` call that moves the remote or the folder also confirms it.
 The progress runs from 0.0 to 1.0 and is zero while the daemon is idle.
 
 ```console
@@ -170,14 +182,14 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttas gdrive '~/Nimbus' 900 30 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttas drive '~/Cloud' 900 30 0
 ```
 
 The values of `ssttas` are `remote`, `local`, `interval_secs`,
-`debounce_secs`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the key, for example:
+`debounce_secs`, and `extra_flags`. The `0` sends an empty list of flags. A refusal names the problem, for example:
 
 ```console
-Call failed: the config key remote is empty. Set a remote name.
+Call failed: The remote is empty. Set it to an rclone remote name, for example drive.
 ```
 
 `busctl --user monitor` does not filter by name. Watch the signal with:
@@ -196,8 +208,9 @@ proxy reports a stale state forever.
 **The tray says "The daemon is not running".** The unit is not running. Run
 `systemctl --user status nimbusd.service` and read `journalctl --user -u
 nimbusd.service`. A bad config makes the daemon stop on purpose, so the unit
-shows as inactive rather than restarting. The daemon also shows the reason as a
-desktop notification titled "Nimbus did not start". If Do Not Disturb is on,
+shows as inactive rather than restarting. The window shows the reason below
+the heading, and a Start daemon button starts the unit again. The daemon also shows the reason as a desktop notification titled
+"Nimbus did not start". If Do Not Disturb is on,
 the notification is in the notification history.
 
 **The daemon says "another daemon already holds io.github.luckjmg.nimbus".**
@@ -209,10 +222,8 @@ the name.
 left rclone without a usable record of your files. The daemon repairs this by
 itself before the next run, so the retry is incremental and no action is needed.
 
-If the message stays in the tray, the daemon cannot repair it. That happens when a
-run died before rclone wrote any record, and then nothing survives to restore. Set
-`resync_pending = true` in the config file and start the daemon again. The cost is
-one full pass over both sides.
+If nothing survives to restore, the window says "A resync is needed". Press
+Resync and confirm. The cost is one full pass over both sides.
 
 A failed run waits for `interval_secs` before it retries, because there is no
 separate retry timer. Set `interval_secs` to something like `300` if the connection

@@ -10,6 +10,7 @@ license = "MIT"
 
 [workspace.dependencies]
 nimbus-ipc = { path = "crates/nimbus-ipc" }
+nimbusd = { path = "crates/nimbusd" }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 zbus = "5.19"

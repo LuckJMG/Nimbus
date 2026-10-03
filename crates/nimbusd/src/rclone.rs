@@ -33,20 +33,21 @@ const TAIL: usize = 10;
 pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     // A run that died before it finished leaves the listing unusable, and rclone
     // answers such a run with "Must run --resync to recover." The repair runs
-    // first, so this run finds the last good listing and stays incremental. The
-    // return value is false when no listing survives, which means this run is
-    // the resync that rebuilds one.
-    let needs_resync = !repair(&config::bisync_dir());
-    let mut child = match command(cfg, needs_resync).spawn() {
+    // first, so this run finds the last good listing and stays incremental.
+    // When no listing survives, only a resync builds one. A resync waits for
+    // the user, so the run stops here unless the engine started it as the
+    // confirmed resync.
+    if !repair(&config::bisync_dir()) && !cfg.resync_pending {
+        let _ = events.send(Event::NeedsResync);
+        return;
+    }
+    let mut child = match command(cfg).spawn() {
         Ok(child) => child,
         Err(err) => {
             let text = format!("the daemon cannot start {PROGRAM}: {err}");
             let _ = events.send(Event::Finished {
                 outcome: Outcome::Stopped,
                 tail: vec![text],
-                // The process never ran, so it left no debris behind. The repair already ran,
-                // so the flag keeps its value from before this attempt.
-                needs_resync,
             });
             return;
         }
@@ -80,7 +81,6 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     let _ = events.send(Event::Finished {
         outcome,
         tail: tail.into(),
-        needs_resync,
     });
 }
 
@@ -146,7 +146,7 @@ fn handle_line(line: &str, tail: &mut VecDeque<String>) -> Option<f64> {
 
 /// Builds the rclone command for one run. The daemon reads the
 /// error output from the process, and it discards the standard output.
-fn command(cfg: &Config, needs_resync: bool) -> Command {
+fn command(cfg: &Config) -> Command {
     let mut cmd = Command::new(PROGRAM);
     cmd.arg("bisync")
         .arg("--stats")
@@ -157,10 +157,10 @@ fn command(cfg: &Config, needs_resync: bool) -> Command {
         // that the daemon owns, so the daemon can repair it after a failed run.
         .arg("--workdir")
         .arg(config::bisync_dir());
-    // The config flag covers the first run and a run after a failure the repair
-    // could not fix. The second condition covers a run that found no listing at
-    // all, which is the same situation seen from the other side.
-    if cfg.resync_pending || needs_resync {
+    // The flag covers the first run, a moved remote or folder, and a run that
+    // found no listing. The engine starts such a run only after the user
+    // confirmed it.
+    if cfg.resync_pending {
         cmd.arg("--resync");
     }
     cmd.args(&cfg.extra_flags)
@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn args_of(cfg: &Config) -> Vec<String> {
-        command(cfg, false)
+        command(cfg)
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
@@ -317,21 +317,6 @@ mod tests {
             !args.iter().any(|arg| arg == "--resync"),
             "a later run must not resync"
         );
-    }
-
-    // The repair found no listing, so the run rebuilds one even though a clean run
-    // already cleared the config flag. Without this the daemon would report the
-    // same refusal forever.
-    #[test]
-    fn a_missing_listing_makes_the_run_resync() {
-        let cfg = Config {
-            resync_pending: false,
-            ..Config::default()
-        };
-        let kept = command(&cfg, false).get_args().any(|arg| arg == "--resync");
-        assert!(!kept, "a surviving listing keeps the run incremental");
-        let rebuilt = command(&cfg, true).get_args().any(|arg| arg == "--resync");
-        assert!(rebuilt, "no listing must rebuild one");
     }
 
     #[test]

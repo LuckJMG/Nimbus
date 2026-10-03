@@ -14,6 +14,11 @@ pub enum Action {
     /// Asks the worker for the keys. The blocking call stays off the GTK
     /// thread, so the answer comes back as a `Reply`.
     OpenSettings,
+    /// Confirms the resync that the daemon waits for. The window sends it only
+    /// after the user accepted the warning.
+    Resync,
+    /// Asks systemd to start the daemon, for a window that shows no daemon.
+    StartDaemon,
     /// Carries the edited keys to the worker, which owns the proxy.
     SaveSettings(Settings),
 }
@@ -37,7 +42,8 @@ pub enum Reply {
 /// What the tray shows. The daemon may not run, so the state is optional.
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
-    Offline,
+    /// Carries the reason that no daemon runs, with the fix.
+    Offline(String),
     Ready(State),
 }
 
@@ -47,7 +53,7 @@ pub enum View {
 pub fn phase(view: &View) -> Option<Phase> {
     match view {
         View::Ready(state) => Some(state.phase),
-        View::Offline => None,
+        View::Offline(_) => None,
     }
 }
 
@@ -69,6 +75,7 @@ pub fn status_text(view: &View) -> String {
         Phase::Idle => String::from("Idle"),
         Phase::Syncing => format!("Syncing, {:.0}%", state.progress * 100.0),
         Phase::Paused => String::from("Paused"),
+        Phase::Resync => String::from("A resync is needed"),
         Phase::Error if state.last_error.is_empty() => String::from("The last run failed"),
         Phase::Error => state.last_error.clone(),
     }
@@ -106,7 +113,7 @@ mod tests {
 
     #[test]
     fn an_offline_view_has_no_phase() {
-        assert_eq!(phase(&View::Offline), None);
+        assert_eq!(phase(&View::Offline(String::new())), None);
     }
 
     #[test]
@@ -116,7 +123,7 @@ mod tests {
 
     #[test]
     fn a_missing_daemon_is_neither_paused_nor_syncing() {
-        assert!(!is_paused(&View::Offline));
-        assert!(!is_syncing(&View::Offline));
+        assert!(!is_paused(&View::Offline(String::new())));
+        assert!(!is_syncing(&View::Offline(String::new())));
     }
 }

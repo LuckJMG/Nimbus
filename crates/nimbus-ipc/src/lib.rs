@@ -23,6 +23,10 @@ pub enum Phase {
     Syncing,
     Paused,
     Error,
+    /// The next run needs `--resync`, and the daemon waits until a client
+    /// calls `Resync`. A resync lets the local copy overwrite a remote copy
+    /// that differs, so the daemon never starts one on its own.
+    Resync,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Type, Value, OwnedValue)]
@@ -75,6 +79,11 @@ pub trait Nimbus {
     /// Writes the keys and saves them. The daemon refuses a value that it
     /// cannot use, and the message from the refusal reaches the caller.
     fn set_settings(&self, settings: Settings) -> zbus::Result<()>;
+
+    /// Confirms one resync. The call does nothing unless the phase is
+    /// `resync`. A `SetSettings` call that moves the remote or the folder
+    /// confirms the resync that the move needs.
+    fn resync(&self) -> zbus::Result<()>;
 
     // The interface has no SetMode method. The daemon runs rclone bisync.
 

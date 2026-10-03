@@ -3,7 +3,8 @@ use std::sync::mpsc::Sender;
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, Image, Label, Orientation, ProgressBar, Window};
 
-use crate::view::{Action, View, is_paused, status_name};
+use crate::view::{Action, View, is_paused, phase, status_name};
+use nimbus_ipc::Phase;
 
 /// The icon names. GTK resolves them from the icon theme of the desktop for
 /// the window, and the desktop resolves the same names for the menu. All three
@@ -68,12 +69,14 @@ fn action_button(name: &str, text: &str) -> (Button, Image, Label) {
 }
 
 /// The error line, or `None` when the line must hide itself. A hidden line
-/// leaves no gap, so a run that succeeds leaves no scar.
+/// leaves no gap, so a run that succeeds leaves no scar. With no daemon, the
+/// line explains why and names the fix.
 fn error_line(view: &View) -> Option<&str> {
-    let View::Ready(state) = view else {
-        return None;
+    let text = match view {
+        View::Ready(state) => &state.last_error,
+        View::Offline(reason) => reason,
     };
-    (!state.last_error.is_empty()).then_some(state.last_error.as_str())
+    (!text.is_empty()).then_some(text.as_str())
 }
 
 pub struct App {
@@ -84,6 +87,10 @@ pub struct App {
     progress: ProgressBar,
     last_run: Label,
     error: Label,
+    sync: Button,
+    resync: Button,
+    pause: Button,
+    start: Button,
     pause_icon: Image,
     pause_text: Label,
 }
@@ -96,12 +103,22 @@ impl App {
         self.phase.set_text(&status_name(view));
         self.pause_text.set_text(pause_label(view));
         self.pause_icon.set_icon_name(Some(pause_icon(view)));
+        // Sync and pause need a daemon, so a window with no daemon offers
+        // the start button in their place.
+        let offline = matches!(view, View::Offline(_));
+        // A pending resync blocks every run, so the window offers the resync
+        // in place of Sync now.
+        let resync = phase(view) == Some(Phase::Resync);
+        self.sync.set_visible(!offline && !resync);
+        self.resync.set_visible(resync);
+        self.pause.set_visible(!offline);
+        self.start.set_visible(offline);
         let View::Ready(state) = view else {
             self.progress.set_fraction(0.0);
             self.progress.set_text(Some("no connection"));
             self.last_run.set_text(&ago_since(0, now));
-            self.error.set_text("");
-            self.error.set_visible(false);
+            self.error.set_text(error_line(view).unwrap_or_default());
+            self.error.set_visible(error_line(view).is_some());
             return;
         };
         self.progress.set_fraction(state.progress);
@@ -111,6 +128,28 @@ impl App {
         self.error.set_text(error_line(view).unwrap_or_default());
         self.error.set_visible(error_line(view).is_some());
     }
+}
+
+/// Asks before a resync. Cancel is the default, so a stray Enter does
+/// nothing.
+fn confirm_resync(parent: &Window, actions: &Sender<Action>) {
+    let dialog = gtk::AlertDialog::builder()
+        .message("Resync both sides?")
+        .detail(format!(
+            "Files on one side only are copied to the other. {}",
+            crate::settings::OVERWRITE
+        ))
+        .buttons(["_Cancel", "_Resync"])
+        .default_button(0)
+        .cancel_button(0)
+        .build();
+    let actions = actions.clone();
+    dialog.choose(Some(parent), gtk::gio::Cancellable::NONE, move |answer| {
+        // A closed dialog is the same as a cancel.
+        if matches!(answer, Ok(1)) {
+            let _ = actions.send(Action::Resync);
+        }
+    });
 }
 
 /// Builds the window. Every widget is a stock GTK widget, so the window
@@ -140,6 +179,10 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     let error = Label::new(None);
     error.set_xalign(0.0);
     error.set_wrap(true);
+    // The stock class takes the error color of the theme.
+    error.add_css_class("error");
+    // The line can carry a command and a path, so the user can copy them.
+    error.set_selectable(true);
     error.set_visible(false);
 
     let (sync, _, _) = action_button(SYNC_ICON, "Sync now");
@@ -148,10 +191,23 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         let _ = sync_actions.send(Action::SyncNow);
     });
 
+    let (resync, _, _) = action_button(SYNC_ICON, "Resync");
+    resync.set_visible(false);
+    let resync_actions = actions.clone();
+    let resync_parent = root.clone();
+    resync.connect_clicked(move |_| confirm_resync(&resync_parent, &resync_actions));
+
     let (pause, pause_icon, pause_text) = action_button(PAUSE_ICON, "Pause");
     let pause_actions = actions.clone();
     pause.connect_clicked(move |_| {
         let _ = pause_actions.send(Action::TogglePaused);
+    });
+
+    let (start, _, _) = action_button(RESUME_ICON, "Start daemon");
+    start.set_visible(false);
+    let start_actions = actions.clone();
+    start.connect_clicked(move |_| {
+        let _ = start_actions.send(Action::StartDaemon);
     });
 
     // The button opens the same dialog as the menu row, so the window needs no
@@ -170,7 +226,9 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     // to the far end instead of sitting next to the two run buttons.
     runs.set_hexpand(true);
     runs.append(&sync);
+    runs.append(&resync);
     runs.append(&pause);
+    runs.append(&start);
 
     let buttons = GtkBox::new(Orientation::Horizontal, 8);
     buttons.append(&runs);
@@ -194,6 +252,10 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         progress,
         last_run,
         error,
+        sync,
+        resync,
+        pause,
+        start,
         pause_icon,
         pause_text,
     }
@@ -256,7 +318,7 @@ mod tests {
         assert_eq!(pause_icon(&ready(Phase::Idle, "")), PAUSE_ICON);
         assert_eq!(pause_icon(&ready(Phase::Syncing, "")), PAUSE_ICON);
         assert_eq!(pause_icon(&ready(Phase::Paused, "")), RESUME_ICON);
-        assert_eq!(pause_icon(&View::Offline), PAUSE_ICON);
+        assert_eq!(pause_icon(&View::Offline(String::new())), PAUSE_ICON);
     }
 
     // The line must hide itself when there is no message, or the window keeps
@@ -268,6 +330,10 @@ mod tests {
             Some("Bisync aborted. Must run --resync to recover.")
         );
         assert_eq!(error_line(&ready(Phase::Idle, "")), None);
-        assert_eq!(error_line(&View::Offline), None);
+        assert_eq!(error_line(&View::Offline(String::new())), None);
+        assert_eq!(
+            error_line(&View::Offline(String::from("Fix: x"))),
+            Some("Fix: x")
+        );
     }
 }

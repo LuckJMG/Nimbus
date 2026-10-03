@@ -20,13 +20,14 @@ pub enum Event {
     Changed,
     /// The ratio is from 0.0 to 1.0.
     Progress(f64),
-    /// The tail holds the last error messages. The flag asks for a resync on
-    /// the next run, because the run left no listing to build one from.
-    Finished {
-        outcome: Outcome,
-        tail: Vec<String>,
-        needs_resync: bool,
-    },
+    /// The tail holds the last error messages.
+    Finished { outcome: Outcome, tail: Vec<String> },
+    /// The run found no listing to repair, so it stopped before rclone
+    /// started. Only a resync builds a listing, and a resync waits for the
+    /// user.
+    NeedsResync,
+    /// The user confirmed one resync.
+    Resync,
 }
 
 /// The state machine of the daemon. This struct decides when a run starts and
@@ -40,6 +41,9 @@ pub struct Engine {
     last_change: Option<Instant>,
     last_finish: Option<Instant>,
     dirty: bool,
+    /// The user confirmed the pending resync. It covers one run, and the
+    /// daemon forgets it on a restart, so every resync has its own answer.
+    confirmed: bool,
 }
 
 impl Engine {
@@ -63,6 +67,7 @@ impl Engine {
             last_change: None,
             last_finish: None,
             dirty: false,
+            confirmed: false,
         }
     }
 
@@ -82,11 +87,22 @@ impl Engine {
             Event::SetSettings(settings) => self.set_settings(&settings),
             Event::Changed => self.last_change = Some(now),
             Event::Progress(ratio) => self.on_progress(ratio),
-            Event::Finished {
-                outcome,
-                tail,
-                needs_resync,
-            } => self.on_finished(outcome, &tail, needs_resync, now, unix),
+            Event::Finished { outcome, tail } => self.on_finished(outcome, &tail, now, unix),
+            Event::NeedsResync => {
+                self.running = false;
+                self.last_finish = Some(now);
+                self.state.progress = 0.0;
+                if !self.cfg.resync_pending {
+                    self.cfg.resync_pending = true;
+                    self.dirty = true;
+                }
+            }
+            Event::Resync => {
+                if self.cfg.resync_pending {
+                    self.confirmed = true;
+                    self.run_wanted = true;
+                }
+            }
         }
     }
 
@@ -94,6 +110,12 @@ impl Engine {
     /// afterwards, so one turn starts at most one run.
     pub fn wants_run(&mut self, now: Instant) -> bool {
         if self.running || self.cfg.paused {
+            return false;
+        }
+        // A resync lets the local copy overwrite a remote copy that differs,
+        // so it waits for the user instead of a timer.
+        if self.cfg.resync_pending && !self.confirmed {
+            self.state.phase = Phase::Resync;
             return false;
         }
         let quiet = Duration::from_secs(self.cfg.debounce_secs);
@@ -140,8 +162,14 @@ impl Engine {
 
     /// Takes the keys from a client. The shared function keeps the pause and
     /// the resync flag, so the daemon owns both.
+    ///
+    /// A client sends a move only after the user confirmed the resync that the
+    /// move needs, so the move counts as that confirmation and starts it.
     fn set_settings(&mut self, settings: &Settings) {
-        apply_settings(&mut self.cfg, settings);
+        if apply_settings(&mut self.cfg, settings) {
+            self.confirmed = true;
+            self.run_wanted = true;
+        }
         self.dirty = true;
     }
 
@@ -156,15 +184,10 @@ impl Engine {
         self.state.phase = Phase::Syncing;
     }
 
-    fn on_finished(
-        &mut self,
-        outcome: Outcome,
-        tail: &[String],
-        needs_resync: bool,
-        now: Instant,
-        unix: u64,
-    ) {
+    fn on_finished(&mut self, outcome: Outcome, tail: &[String], now: Instant, unix: u64) {
         self.running = false;
+        // A confirmation covers one run. A failed resync asks again.
+        self.confirmed = false;
         self.last_finish = Some(now);
         self.state.last_run = unix;
         // The contract says the ratio is zero while the daemon is idle, and a
@@ -188,13 +211,6 @@ impl Engine {
         }
         self.state.phase = Phase::Error;
         self.state.last_error = last_error_text(outcome, tail);
-        // The run left no listing, so rclone refuses the next run until it
-        // resyncs. Setting the flag here is what makes the daemon recover from
-        // a lost connection on its own.
-        if needs_resync && !self.cfg.resync_pending {
-            self.cfg.resync_pending = true;
-            self.dirty = true;
-        }
     }
 }
 
@@ -229,35 +245,19 @@ mod tests {
             local: LocalDir::new(Path::new("/srv/nimbus")),
             interval_secs: 900,
             debounce_secs: 30,
+            // A new config asks for a resync, and a resync waits for the
+            // user. Most tests are about runs, so they start from a settled
+            // config, and the resync tests raise the flag themselves.
+            resync_pending: false,
             ..Config::default()
         };
         over(&mut cfg);
         Engine::new(cfg)
     }
 
-    /// Ends a run that left a listing behind, which is every run that did not
-    /// need a resync.
     fn done(engine: &mut Engine, at: Instant, outcome: Outcome, tail: &[&str]) {
-        finished(engine, at, outcome, tail, false);
-    }
-
-    fn finished(
-        engine: &mut Engine,
-        at: Instant,
-        outcome: Outcome,
-        tail: &[&str],
-        needs_resync: bool,
-    ) {
         let tail = tail.iter().map(|line| String::from(*line)).collect();
-        engine.on_event(
-            Event::Finished {
-                outcome,
-                tail,
-                needs_resync,
-            },
-            at,
-            UNIX,
-        );
+        engine.on_event(Event::Finished { outcome, tail }, at, UNIX);
     }
 
     #[test]
@@ -419,7 +419,7 @@ mod tests {
         });
         e.on_event(
             Event::SetSettings(Settings {
-                remote: String::from("gdrive"),
+                remote: String::from("drive"),
                 local: String::from("/srv/nimbus"),
                 interval_secs: 900,
                 debounce_secs: 30,
@@ -444,7 +444,7 @@ mod tests {
         done(&mut e, at, Outcome::Success, &[]);
         e.on_event(
             Event::SetSettings(Settings {
-                remote: String::from("gdrive"),
+                remote: String::from("drive"),
                 local: String::from("/srv/nimbus"),
                 interval_secs: 60,
                 debounce_secs: 30,
@@ -474,9 +474,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_that_kept_its_listing_does_not_ask_for_a_resync() {
-        // The default config carries resync_pending, so the test starts from a
-        // settled state where a clean run has already cleared the flag.
-        let mut e = engine(|cfg| cfg.resync_pending = false);
+        let mut e = engine(|_| {});
         done(&mut e, Instant::now(), Outcome::Failed(7), &[]);
         assert!(
             !e.config().resync_pending,
@@ -485,37 +483,105 @@ mod tests {
         assert!(!e.take_dirty(), "the config file must not change");
     }
 
-    // The repair fails when the run left no listing at all. The next run has
-    // nothing to compare against, so it must resync or rclone refuses forever.
+    // A resync lets the local copy overwrite a remote copy that differs, so
+    // the daemon must never start one on a timer.
     #[test]
-    fn a_failed_run_without_a_listing_asks_for_a_resync() {
-        let mut e = engine(|cfg| cfg.resync_pending = false);
-        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
-        assert!(e.config().resync_pending, "the next run must resync");
+    fn a_pending_resync_waits_for_the_user() {
+        let at = Instant::now();
+        let mut e = engine(|cfg| cfg.resync_pending = true);
+        assert!(!e.wants_run(at), "a resync needs a confirmation");
+        assert_eq!(e.snapshot().phase, Phase::Resync);
+        e.on_event(Event::SyncNow, at, UNIX);
+        assert!(!e.wants_run(at), "Sync now is not a confirmation");
+        e.on_event(Event::Resync, at, UNIX);
+        assert!(e.wants_run(at), "the confirmation starts the resync");
+    }
+
+    // The repair fails when the run left no listing at all. rclone then
+    // refuses every run until a resync builds one, and the resync waits.
+    #[test]
+    fn a_run_without_a_listing_asks_for_a_resync() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        assert!(e.wants_run(at));
+        e.on_event(Event::NeedsResync, at, UNIX);
+        assert!(e.config().resync_pending, "the flag survives a restart");
         assert!(e.take_dirty(), "the daemon must write the config file");
+        e.on_event(Event::SyncNow, at, UNIX);
+        assert!(!e.wants_run(at), "the resync waits for the user");
+        assert_eq!(e.snapshot().phase, Phase::Resync);
     }
 
     #[test]
-    fn a_resync_recovers_the_daemon() {
+    fn a_confirmed_resync_recovers_the_daemon() {
         let at = Instant::now();
-        let mut e = engine(|cfg| {
-            cfg.interval_secs = 100_000;
-            cfg.resync_pending = false;
-        });
-        finished(&mut e, at, Outcome::Failed(7), &[], true);
+        let mut e = engine(|_| {});
+        assert!(e.wants_run(at));
+        e.on_event(Event::NeedsResync, at, UNIX);
+        e.on_event(Event::Resync, at, UNIX);
+        assert!(e.wants_run(at));
         done(&mut e, at, Outcome::Success, &[]);
         assert!(!e.config().resync_pending, "the clean run cleared it");
         assert_eq!(e.snapshot().phase, Phase::Idle);
     }
 
-    // The flag is already set when a second failure arrives, so the config file
-    // is written once instead of on every failed run.
+    // A failed resync must not repeat on a timer, because the user agreed to
+    // one run and not to every retry.
     #[test]
-    fn a_repeated_failure_does_not_rewrite_the_config() {
-        let mut e = engine(|cfg| cfg.resync_pending = false);
-        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
-        assert!(e.take_dirty(), "the first failure writes the flag");
-        finished(&mut e, Instant::now(), Outcome::Failed(7), &[], true);
+    fn a_confirmation_covers_one_run() {
+        let at = Instant::now();
+        let mut e = engine(|cfg| cfg.resync_pending = true);
+        e.on_event(Event::Resync, at, UNIX);
+        assert!(e.wants_run(at));
+        done(&mut e, at, Outcome::Failed(7), &[]);
+        e.on_event(Event::SyncNow, at, UNIX);
+        assert!(!e.wants_run(at), "the failed resync asks again");
+    }
+
+    // The tray sends a move only after the user confirmed the resync in the
+    // settings dialog, so a second question would ask the same thing twice.
+    #[test]
+    fn a_moved_folder_confirms_its_resync() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        assert!(e.wants_run(at));
+        done(&mut e, at, Outcome::Success, &[]);
+        e.on_event(
+            Event::SetSettings(Settings {
+                remote: String::from("drive"),
+                local: String::from("/srv/elsewhere"),
+                interval_secs: 900,
+                debounce_secs: 30,
+                extra_flags: Vec::new(),
+            }),
+            at,
+            UNIX,
+        );
+        assert!(e.config().resync_pending);
+        assert!(e.wants_run(at), "the move confirms and starts the resync");
+    }
+
+    // A confirmation with nothing to confirm must not arm a later resync.
+    #[test]
+    fn a_confirmation_without_a_pending_resync_does_nothing() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        assert!(e.wants_run(at));
+        done(&mut e, at, Outcome::Success, &[]);
+        e.on_event(Event::Resync, at, UNIX);
+        e.on_event(Event::NeedsResync, at, UNIX);
+        assert!(!e.wants_run(at), "the old confirmation must not count");
+    }
+
+    // The flag is already set when a second refusal arrives, so the config
+    // file is written once instead of on every attempt.
+    #[test]
+    fn a_repeated_refusal_does_not_rewrite_the_config() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        e.on_event(Event::NeedsResync, at, UNIX);
+        assert!(e.take_dirty(), "the first refusal writes the flag");
+        e.on_event(Event::NeedsResync, at, UNIX);
         assert!(!e.take_dirty(), "the flag was already set");
     }
 

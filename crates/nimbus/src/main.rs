@@ -79,7 +79,7 @@ fn start(hidden: bool) -> Result<gtk::Application> {
         .build()
         .context("the tray cannot build the proxy")?;
 
-    let view = Arc::new(Mutex::new(View::Offline));
+    let view = Arc::new(Mutex::new(View::Offline(String::new())));
     let (action_tx, action_rx) = mpsc::channel::<Action>();
     let (reply_tx, reply_rx) = mpsc::channel::<Reply>();
 
@@ -278,7 +278,7 @@ impl Worker {
             }
             let next = match proxy.state() {
                 Ok(state) => View::Ready(state),
-                Err(_) => View::Offline,
+                Err(_) => View::Offline(offline_reason()),
             };
             if tray::refresh(&handle, &view, next) {
                 // The panel dropped the item. The window keeps working, so the
@@ -286,6 +286,22 @@ impl Worker {
                 eprintln!("nimbus: the desktop closed the tray item");
             }
         }
+    }
+}
+
+/// Explains why no daemon answers, and names the fix. A daemon with a bad
+/// config exits after it refuses, so the tray runs the same check to find the
+/// cause. The daemon writes a default config on its first start, and the tray
+/// never writes the file, so a missing file means the daemon never ran.
+fn offline_reason() -> String {
+    let checked = if nimbusd::config::default_file().exists() {
+        nimbusd::config::load().and_then(|cfg| Ok(cfg.check()?))
+    } else {
+        Ok(())
+    };
+    match checked {
+        Ok(()) => String::new(),
+        Err(err) => format!("{err:#}"),
     }
 }
 
@@ -309,10 +325,28 @@ fn send(
             return;
         }
         Action::OpenSettings => return open_settings(proxy, show),
+        Action::StartDaemon => return start_daemon(proxy),
+        Action::Resync => proxy.resync(),
         Action::SaveSettings(keys) => return save_settings(keys, proxy, show),
     };
     if let Err(err) = result {
         eprintln!("nimbus: the daemon refused the request: {err}");
+    }
+}
+
+/// Asks systemd to start the daemon unit, so the daemon runs under the restart
+/// policy of the unit. A daemon with a bad config refuses again, and the next
+/// poll shows the reason in the window.
+fn start_daemon(proxy: &NimbusProxyBlocking<'_>) {
+    let started = proxy.inner().connection().call_method(
+        Some("org.freedesktop.systemd1"),
+        "/org/freedesktop/systemd1",
+        Some("org.freedesktop.systemd1.Manager"),
+        "StartUnit",
+        &("nimbusd.service", "replace"),
+    );
+    if let Err(err) = started {
+        eprintln!("nimbus: systemd cannot start nimbusd.service: {err}");
     }
 }
 
@@ -342,29 +376,27 @@ fn save_settings(
     let _ = show.send(reply);
 }
 
+/// The error name of a daemon refusal. The bus answers a call to a missing
+/// daemon with a method error too, `ServiceUnknown` with "The name is not
+/// activatable", so only this name carries words from the daemon.
+const REFUSED: &str = "org.freedesktop.DBus.Error.InvalidArgs";
+
 /// Turns a failed call into a reply.
 ///
-/// Only a reply from the daemon carries words that the user can act on. Every
-/// other failure is the bus or the daemon process, so the dialog says that
-/// the daemon is not running instead of passing on a zbus message.
+/// Only a refusal from the daemon carries words that the user can act on.
+/// Every other failure is the bus or the daemon process. The status window
+/// already says why the daemon is not running, so the dialog shows nothing.
 fn refuse(err: zbus::Error) -> Reply {
     let said = match &err {
-        zbus::Error::MethodError(_, detail, _) => detail.clone(),
-        zbus::Error::FDO(inner) => Some(inner.to_string()),
+        zbus::Error::MethodError(name, detail, _) if name.as_str() == REFUSED => detail.clone(),
+        zbus::Error::FDO(inner) => match inner.as_ref() {
+            zbus::fdo::Error::InvalidArgs(text) => Some(text.clone()),
+            _ => None,
+        },
         _ => None,
     };
-    let text = said_or_missing(said);
-    eprintln!("nimbus: the daemon refused the request: {text}");
-    Reply::Refused(text)
-}
-
-/// The words for the dialog, or the missing-daemon text.
-///
-/// Only a refusal carries words that the user can act on. Every other failure
-/// came from the bus or from the daemon process, and a zbus message there names
-/// a transport problem instead of a cause.
-fn said_or_missing(said: Option<String>) -> String {
-    said.unwrap_or_else(|| String::from("The daemon is not running"))
+    eprintln!("nimbus: the request failed: {err}");
+    Reply::Refused(said.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -372,29 +404,29 @@ mod tests {
     use super::*;
 
     // A daemon that does not run sends a name error, which carries no words for
-    // the user. The dialog then names the cause instead of passing on a zbus
-    // message about the bus.
+    // the user. The status window names the cause, so the dialog shows none.
     #[test]
-    fn a_missing_daemon_says_so_in_the_dialog() {
+    fn a_missing_daemon_leaves_the_dialog_quiet() {
         assert_eq!(
             refuse(zbus::Error::NameTaken),
-            Reply::Refused(String::from("The daemon is not running"))
+            Reply::Refused(String::new())
         );
     }
 
-    // A refusal arrives as a method error, and its detail holds the words that the
-    // daemon wrote. The dialog shows them without the D-Bus name in front.
+    // The bus answers for a daemon that is not on it. Its words name the bus,
+    // not the cause, so the dialog must not show them. The daemon's own
+    // refusal reaches the dialog unchanged.
     #[test]
-    fn a_refusal_shows_the_words_from_the_daemon() {
-        let said = said_or_missing(Some(String::from(
-            "the config key remote is empty. Set a remote name.",
-        )));
-        assert_eq!(said, "the config key remote is empty. Set a remote name.");
-    }
-
-    // A bus failure reaches the same dialog, and it has no words to pass on.
-    #[test]
-    fn a_bus_failure_says_the_daemon_is_not_running() {
-        assert_eq!(said_or_missing(None), "The daemon is not running");
+    fn only_the_daemon_refusal_reaches_the_dialog() {
+        let bus = zbus::fdo::Error::ServiceUnknown(String::from("The name is not activatable"));
+        assert_eq!(
+            refuse(zbus::Error::FDO(Box::new(bus))),
+            Reply::Refused(String::new())
+        );
+        let daemon = zbus::fdo::Error::InvalidArgs(String::from("The remote is empty."));
+        assert_eq!(
+            refuse(zbus::Error::FDO(Box::new(daemon))),
+            Reply::Refused(String::from("The remote is empty."))
+        );
     }
 }

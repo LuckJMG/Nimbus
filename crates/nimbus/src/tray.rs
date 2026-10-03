@@ -61,6 +61,7 @@ fn tooltip(view: &View, icon: &str) -> ksni::ToolTip {
 fn overlay(view: &View) -> String {
     match phase(view) {
         Some(Phase::Error) => String::from("dialog-error"),
+        Some(Phase::Resync) => String::from("dialog-warning"),
         _ => String::new(),
     }
 }
@@ -309,7 +310,7 @@ mod tests {
 
     #[test]
     fn the_offline_tooltip_names_the_daemon() {
-        let tip = tooltip(&View::Offline, ICON);
+        let tip = tooltip(&View::Offline(String::new()), ICON);
         assert_eq!(tip.description, "The daemon is not running");
         assert_eq!(tip.title, "Nimbus");
     }
@@ -345,21 +346,24 @@ mod tests {
         assert_eq!(overlay(&ready(Phase::Idle, "")), "");
         assert_eq!(overlay(&ready(Phase::Syncing, "")), "");
         assert_eq!(overlay(&ready(Phase::Paused, "")), "");
-        assert_eq!(overlay(&View::Offline), "");
+        assert_eq!(overlay(&View::Offline(String::new())), "");
     }
 
     #[test]
     fn the_pause_state_comes_from_the_view() {
         assert!(is_paused(&ready(Phase::Paused, "")));
         assert!(!is_paused(&ready(Phase::Idle, "")));
-        assert!(!is_paused(&View::Offline), "a missing daemon is not paused");
+        assert!(
+            !is_paused(&View::Offline(String::new())),
+            "a missing daemon is not paused"
+        );
     }
 
     #[test]
     fn the_sync_state_comes_from_the_view() {
         assert!(is_syncing(&ready(Phase::Syncing, "")));
         assert!(!is_syncing(&ready(Phase::Idle, "")));
-        assert!(!is_syncing(&View::Offline));
+        assert!(!is_syncing(&View::Offline(String::new())));
     }
 
     #[test]
@@ -373,7 +377,7 @@ mod tests {
 
     #[test]
     fn the_menu_lists_the_items_in_order() {
-        let menu = tray(View::Offline).menu();
+        let menu = tray(View::Offline(String::new())).menu();
         assert_eq!(
             labels(&menu),
             [
@@ -391,7 +395,7 @@ mod tests {
     #[test]
     fn the_menu_header_is_not_clickable() {
         use ksni::MenuItem;
-        let menu = tray(View::Offline).menu();
+        let menu = tray(View::Offline(String::new())).menu();
         let MenuItem::Standard(header) = &menu[0] else {
             panic!("the first item is the status line");
         };

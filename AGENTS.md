@@ -31,8 +31,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 125 tests pass today: 3 in `nimbus-ipc`, 76 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 41 in `nimbus`.
+runs the same three. 127 tests pass today: 3 in `nimbus-ipc`, 79 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 40 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -73,12 +73,29 @@ The daemon targets the root of the remote, so the remote dir itself is the
 destination and it must exist before the first run. Google Drive needs no
 folder created, so this affects test remotes only.
 
-The first start writes a config with the defaults, then refuses to run, because
-`~/Nimbus` does not exist. That refusal is the signal to edit the scratch config.
-Set the watched folder, the remote, and short timers:
+Write the scratch config before the first start. The default `local` is
+`~/Cloud`, and on a machine where that folder exists, a first start does not
+refuse. It serves the real folder against the scratch remote. Only the resync
+gate keeps that first run from starting. Set the watched folder, the remote,
+and short timers:
 
 ```console
-sed -i 's|^remote = .*|remote = "drive"|; s|^local = .*|local = "/tmp/scratch/local"|; s|^interval_secs = .*|interval_secs = 60|; s|^debounce_secs = .*|debounce_secs = 3|' /tmp/scratch/cfg/nimbus/config.toml
+cat > /tmp/scratch/cfg/nimbus/config.toml <<'TOML'
+remote = "drive"
+local = "/tmp/scratch/local"
+paused = false
+interval_secs = 60
+debounce_secs = 3
+resync_pending = true
+extra_flags = []
+TOML
+```
+
+The daemon then waits in the `resync` phase. Confirm the first resync with
+the Resync button, or over the bus:
+
+```console
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 Resync
 ```
 
 Short timers matter. The defaults wait 900 seconds on the interval and 30 seconds
@@ -124,7 +141,7 @@ on the assumption they are decoration.
 - Only `--stats 1s` **with** `--log-level INFO` writes progress into a pipe. Without the level, rclone writes nothing and no error appears. A test asserts both flags.
 - `--stats-one-line` emits nothing in a pipe. `--progress` drops the line separators, so a line reader merges two updates into one. Both are wrong here.
 - Progress arrives on stderr. The command nulls stdout, so the child can never block on a full pipe.
-- `--resync` is required on the first run, and after a failure that left no listing to repair. `resync_pending` in the config tracks the first case and clears only after a run that ends without an error. See "A lost connection" below.
+- `--resync` is required on the first run, after a move of the remote or the folder, and after a failure that left no listing to repair. `resync_pending` in the config tracks all three, and it clears only after a run that ends without an error. The daemon never adds the flag on its own. See "The resync gate" below.
 - Error lines carry ANSI colour codes even in a pipe. `strip_ansi` removes them before the text reaches the tray.
 - Two lines start with `Transferred:`. Only the byte line has a percentage, and only the byte line parses.
 - The command passes `--workdir`, which points the listing at `$XDG_CONFIG_HOME/nimbus/bisync`. rclone creates the dir, so the daemon does not. The flag is also what lets `repair` find the files.
@@ -164,7 +181,8 @@ dropped connection does. Then restart the daemon and press Sync now once:
 - `sha256sum` on both sides must match.
 
 Repeat with the `.lst` files deleted and only the `.lst-old` spares left, and then
-with the whole dir emptied. The last case must self-heal through a resync. The
+with the whole dir emptied. The last case must stop in the `resync` phase with no
+rclone process, and it must recover after one confirmed resync. The
 "A lost connection" section above records the three shapes and what each one leaves
 behind.
 
@@ -211,8 +229,9 @@ makes the run itself incremental.
 
 The function keeps a `.lst`, restores one from a `.lst-old` spare when no `.lst`
 survives, and deletes the `.lst-new`, `.lst-err`, and `.lck` debris. It returns
-false only in shape C, and the caller then adds `--resync` to that run. The spare
-is never deleted, so it stays as a backup for the next crash.
+false only in shape C. The run then stops before rclone starts and sends
+`NeedsResync`, because a resync waits for the user. The spare is never deleted,
+so it stays as a backup for the next crash.
 
 Two traps in that function:
 
@@ -220,9 +239,29 @@ Two traps in that function:
   one restores half the pair, and rclone still refuses. `spare_restores_a_missing_listing` covers this.
 - The function must not restore a `.lst-old` over a `.lst` that exists. The present listing is the newer state, and the spare is older. `a_present_listing_wins_over_the_spare` covers this.
 
-The engine also sets `resync_pending` when a run asks for one, so the flag survives
-a restart. That path is the fallback for shape C and it costs one full pass over
-both sides, which is why the repair avoids it in shapes A and B.
+The engine sets `resync_pending` on `NeedsResync`, so the flag survives a
+restart. That path is the fallback for shape C, and it costs one full pass over
+both sides and one confirmation, which is why the repair avoids it in shapes A
+and B.
+
+## The resync gate
+
+A resync lets the local copy overwrite a remote copy that differs, so the
+daemon never starts one without a confirmation. `wants_run` refuses every run
+while `resync_pending` is set and `confirmed` is not, and it reports the phase
+`resync`. The phase is a string on the wire, so the signature stays `(sdts)`.
+
+Two things confirm a resync:
+
+- The `Resync` method, which the window sends after its dialog.
+- A `SetSettings` call that moves the remote or the folder. The tray sends a
+  move only after the "Save and resync" dialog, so a second question would ask
+  the same thing twice. The move also starts the run, because nothing else
+  would until the next interval.
+
+`confirmed` lives in memory and clears after every finished run. A restart or
+a failed resync therefore asks again. `--resync` follows `resync_pending` only,
+so the gate is the one place that decides.
 
 A file that changes on both sides during an outage does not lose data. rclone writes
 `name.conflict1` and `name.conflict2`, and both copies survive on both sides. A live
@@ -252,7 +291,7 @@ Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 - `LocalDir` keeps a tilde for the file and drops it for rclone. The wire field
   is a plain `String`, so `LocalDir::path()` and `LocalDir::text()` are both
   needed, and the tilde must survive a save through the dialog.
-- `u64` is `t` on the wire, not `u`. The pinned signature is `(sstt)`, and
+- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttas)`, and
   `settings_signature_is_stable` holds it.
 - `Config` carries `deny_unknown_fields`, so a file from a build that read a
   `path` key stops the daemon with the line to delete. Serde ignores an unknown
@@ -263,14 +302,23 @@ Four traps, all hit and all fixed. Read these before touching `settings.rs`.
   refuses.
 
 A moved `remote` or `local` has no bisync listing, because rclone names its
-listing after the pair of paths. So `apply_settings` raises `resync_pending`,
-which costs one full pass. The comparison is on the folder that rclone opens,
+listing after the pair of paths. So `apply_settings` raises `resync_pending`
+and returns true, which costs one full pass. The engine takes that return
+value as the confirmation of the resync. The comparison is on the folder that rclone opens,
 because a text change that keeps the folder must not cost a resync.
 
-A refusal arrives as a `zbus::Error::MethodError`, and its `detail` holds the
-words from `check()`. Every other error is the bus or the daemon process, and a
-zbus message there names a transport problem instead of a cause, so `refuse`
-falls back to "The daemon is not running".
+A refusal arrives as a `zbus::Error::MethodError` named `InvalidArgs`, and its
+`detail` holds the words from `check()`. The bus also answers a call to a
+missing daemon with a method error, `ServiceUnknown` with "The name is not
+activatable", so `refuse` matches the name, not only the variant. Every other
+error leaves the line empty, because the status window already says why the
+daemon is not running.
+
+`check` returns `Invalid`, which names the refused key. The dialog runs the
+same check on the typed keys before Save sends them, and `Hints` shows the
+reason under the field that holds the key. The daemon checks again, because
+the dialog is not the only client. A refusal that belongs to no field, such as
+a daemon that does not run, goes to the line above the buttons.
 
 The dialog is built once and reused. A rebuild would throw away a half-typed
 value, and it would leave the panel with two windows for one click.
@@ -284,17 +332,17 @@ The daemon side needs no click, so read it over the bus first:
 
 ```console
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "sstt" "" /tmp/scratch/local 60 3
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttas" "" /tmp/scratch/local 60 3 0
 ```
 
-The second call must fail with "the config key remote is empty", and the config
+The second call must fail with "The remote is empty", and the config
 file must be unchanged afterwards.
 
 Then move the folder and read the log. A save that leaves `local` alone must
 produce no new line, and a save that moves it must name the new folder:
 
 ```console
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "sstt" drive /tmp/scratch/local2 60 3
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttas" drive /tmp/scratch/local2 60 3 0
 ```
 
 After that line, a file change in `/tmp/scratch/local2` must start a run, and a
@@ -325,6 +373,15 @@ The window sets no title bar. The caption comes from the desktop, either from
 KWin or from `gtk-decoration-layout` when it asks GTK to draw one. A
 `HeaderBar` puts a second heading above the state line and takes room from the
 body. Do not add one back.
+
+The error lines in the window and the dialog take the stock `error` class, so
+the theme picks the color. A live run on KDE drew it orange. Do
+not set a fixed color.
+
+The dialog entries carry example placeholders. Breeze for GTK draws a
+placeholder in the full text color, so an example read as the current value
+in a live run. One CSS rule in `settings.rs` sets the placeholder opacity to
+0.5, which fades the theme color instead of replacing it.
 
 The two buttons take their icons from the icon theme, so the names in
 `window.rs` must exist in it. The check that matters is a live run on the
@@ -485,6 +542,18 @@ is activatable through `plasma_waitforname`, so a call made before the panel
 starts waits for it. A desktop with no notification server loses the
 notification, and the line on stderr stays.
 
+The window shows the same text. The daemon has exited, so the tray cannot ask
+it. When no daemon answers, the tray runs `config::load` and `check` from the
+`nimbusd` library and carries the result in `View::Offline`. The tray reads
+the config only when the file exists, because `load` writes a default file and
+the daemon is the only writer. The message carries no file path and no
+command. The window offers a Start daemon button instead, which calls
+`StartUnit` on the systemd user manager, so the daemon runs under the restart
+policy of its unit.
+
+Each message from `check` and `load` names the error in one short sentence. A
+second sentence names the fix only when the fix is not obvious from the error.
+
 The name check needs care. `request_name_with_flags` returns
 `zbus::Error::NameTaken` for a taken name, not a reply, so the reply check that
 follows it never runs. `name_is_taken` matches the error, and the reply check
@@ -492,7 +561,7 @@ stays as a second line of defence.
 
 ## Design limits, not bugs
 
-- A lost connection is repaired on the next run, and only shape C costs a resync. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
+- A lost connection is repaired on the next run, and only shape C costs a resync, which waits for a confirmation. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
 - A failed run waits for the next `interval_secs` before it retries. There is no separate retry timer, so set `interval_secs` low if the connection is often down.
 - The watcher sees only the local folder. A change made from another machine arrives on `interval_secs` (default 900), not sooner.
 - `is_trigger` drops `Access` and `Any` events. rclone reads the local folder during every run, so a filter that accepts reads never stops syncing.
@@ -524,7 +593,8 @@ for example `feat(daemon): add the watcher and the engine loop`.
 `nimbus-ipc` and `nimbusd` need no C library on Linux, apart from a linker. The
 `inotify-sys` crate in the tree links `libinotify` only on NetBSD and OpenBSD.
 `async-io` comes in through `zbus`; there is no `tokio` in the tree. The `nimbus`
-crate links GTK4 through the `gtk4` bindings, so the build needs the GTK4
+crate depends on the `nimbusd` library for the config check, and it links GTK4
+through the `gtk4` bindings, so the build needs the GTK4
 development package. The crate sets `default-features = false` on `ksni`, because
 the default feature pulls in `tokio`. That keeps a second async runtime out of the
 tree.

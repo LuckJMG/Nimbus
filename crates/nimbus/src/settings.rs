@@ -8,6 +8,7 @@ use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, Entry, Label, Orientation, SpinButton, Window};
 
 use nimbus_ipc::Settings;
+use nimbusd::config::{Config, Invalid, apply_settings};
 
 use crate::view::Action;
 
@@ -25,6 +26,79 @@ fn row(label: &str, field: &impl IsA<gtk::Widget>) -> GtkBox {
     line.append(&caption);
     line.append(field);
     line
+}
+
+/// An error line in the theme's error color. It stays hidden until it has a
+/// message.
+fn error_line() -> Label {
+    let line = Label::new(None);
+    line.set_xalign(0.0);
+    line.set_wrap(true);
+    line.add_css_class("error");
+    line.set_visible(false);
+    line
+}
+
+/// A field that `check` can refuse, with the error line under it.
+#[derive(Clone)]
+struct Hint {
+    key: &'static str,
+    field: gtk::Widget,
+    line: Label,
+}
+
+impl Hint {
+    fn new(key: &'static str, field: &impl IsA<gtk::Widget>) -> Self {
+        let line = error_line();
+        // The line sits under the field, not under the caption.
+        line.set_halign(Align::End);
+        Self {
+            key,
+            field: field.clone().upcast(),
+            line,
+        }
+    }
+
+    /// Marks the field in the error color and shows the reason when `check`
+    /// refused this key. Otherwise it clears both.
+    fn show(&self, invalid: Option<&Invalid>) {
+        let reason = invalid
+            .filter(|i| i.key == self.key)
+            .map(|i| i.reason.as_str());
+        self.line.set_text(reason.unwrap_or_default());
+        self.line.set_visible(reason.is_some());
+        if reason.is_some() {
+            self.field.add_css_class("error");
+        } else {
+            self.field.remove_css_class("error");
+        }
+    }
+
+    /// The labelled row with the error line close under it. The body spaces
+    /// its rows wide, so the line needs a box of its own to stay close.
+    fn row(&self, label: &str) -> GtkBox {
+        let group = GtkBox::new(Orientation::Vertical, 4);
+        group.append(&row(label, &self.field));
+        group.append(&self.line);
+        group
+    }
+}
+
+/// The hints for remote, local, interval_secs, and debounce_secs.
+type Hints = [Hint; 4];
+
+fn show(hints: &Hints, invalid: Option<&Invalid>) {
+    for hint in hints {
+        hint.show(invalid);
+    }
+}
+
+/// Runs the check of the daemon on the typed keys, so the dialog can name
+/// the field before the keys leave. The daemon checks them again.
+fn invalid(keys: &Settings) -> Option<Invalid> {
+    let mut candidate = Config::default();
+    apply_settings(&mut candidate, keys);
+    candidate.check().err()
 }
 
 /// A spin button for a time in seconds. The lower bound is one, because the
@@ -125,47 +199,29 @@ fn folder_of(raw: &str) -> PathBuf {
     }
 }
 
+/// What a resync risks. The settings warning and the resync dialog both say it,
+/// because each one is the confirmation for a resync.
+pub const OVERWRITE: &str = "Where a file differs, the local copy replaces the remote copy.";
+
 /// The headline and the detail for one save.
 ///
 /// The two parts exist because `AlertDialog` takes two fields and draws them at
-/// different sizes. A user reads the headline to learn what changes and the
-/// detail to learn what it costs, so each part carries one of those.
+/// different sizes. The headline names the change, and the detail names the
+/// cost.
 pub fn warning(before: &Settings, after: &Settings) -> (String, String) {
-    let move_ = moved(before, after);
-    if move_ == Move::None {
-        return (String::new(), String::new());
-    }
-    // The daemon targets the root of the remote, so the headline names the same
-    // place that a run will use. A remote move names the remote, because the
-    // local folder does not change. A folder move names the folder, for the
-    // same reason.
-    let target = match move_ {
-        Move::Remote => format!("{}:/", after.remote),
-        Move::Folder | Move::Both => after.local.clone(),
-        Move::None => String::new(),
+    // The daemon targets the root of the remote, so the headline names the
+    // same place that a run will use.
+    let remote = format!("{}:/", after.remote);
+    let target = match moved(before, after) {
+        Move::None => return (String::new(), String::new()),
+        Move::Remote => remote,
+        Move::Folder => after.local.clone(),
+        Move::Both => format!("{} and {remote}", after.local),
     };
-    let headline = format!("This moves the sync to {target}.");
-    let mut detail = String::from(
-        "Nimbus keeps a record of what it has already copied. A new place has no \
-         record, so the next run copies everything again instead of only what \
-         changed. A large remote takes a while.",
-    );
-    match move_ {
-        Move::Remote => {
-            detail.push_str(" The whole remote will be compared with the local folder.");
-        }
-        Move::Folder => {
-            detail.push_str(&format!(" {} will no longer start a run.", before.local));
-        }
-        Move::Both => {
-            detail.push_str(&format!(
-                " The whole remote will be compared with the local folder, and {} will no longer start a run.",
-                before.local
-            ));
-        }
-        Move::None => {}
-    }
-    (headline, detail)
+    (
+        format!("Move the sync to {target}?"),
+        format!("The next run is a full resync. {OVERWRITE}"),
+    )
 }
 
 fn text(field: &Entry, value: &str) {
@@ -191,6 +247,7 @@ fn bounded(value: u64) -> f64 {
 pub struct App {
     pub root: Window,
     fields: Fields,
+    hints: Hints,
     error: Label,
     /// The keys as the daemon last reported them. The Save button compares the
     /// fields with this copy, so a warning covers a real move and nothing else.
@@ -203,15 +260,17 @@ impl App {
     pub fn apply(&self, settings: &Settings) {
         self.fields.write(settings);
         self.reported.replace(settings.clone());
+        show(&self.hints, None);
         self.error.set_text("");
         self.error.set_visible(false);
     }
 
     /// Shows the message from a refusal. The daemon writes the text so the
-    /// dialog and the journal say the same thing.
+    /// dialog and the journal say the same thing. An empty message hides the
+    /// line, because a daemon that does not run has its reason in the window.
     pub fn refuse(&self, message: &str) {
         self.error.set_text(message);
-        self.error.set_visible(true);
+        self.error.set_visible(!message.is_empty());
     }
 
     /// Closes the dialog after the daemon took the keys.
@@ -243,8 +302,8 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     // daemon writes these into the config file, so they match what a first
     // open shows. Both sides must agree, or a Save with no edit sees a move.
     let start = Settings {
-        remote: String::from("gdrive"),
-        local: String::from("~/Nimbus"),
+        remote: String::from("drive"),
+        local: String::from("~/Cloud"),
         interval_secs: 900,
         debounce_secs: 30,
         extra_flags: Vec::new(),
@@ -259,6 +318,21 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     };
     text(&fields.remote, &start.remote);
     text(&fields.local, &start.local);
+    // A placeholder shows only in an empty field. Adwaita dims it, but Breeze
+    // draws it in the full text color, so it reads as the current value. The
+    // rule fades the theme color instead of setting one.
+    let dim = gtk::CssProvider::new();
+    dim.load_from_data("placeholder { opacity: 0.5; }");
+    gtk::style_context_add_provider_for_display(
+        &WidgetExt::display(&root),
+        &dim,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    fields.remote.set_placeholder_text(Some("drive"));
+    fields.local.set_placeholder_text(Some("~/Cloud"));
+    fields
+        .flags
+        .set_placeholder_text(Some("--drive-skip-shortcuts"));
 
     // The daemon's copy of the keys. The Save button reads it to decide
     // whether the save needs a warning. The seed must match what the widgets
@@ -266,13 +340,26 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     // through.
     let reported = Rc::new(RefCell::new(start));
 
+    let hints: Hints = [
+        Hint::new("remote", &fields.remote),
+        Hint::new("local", &fields.local),
+        Hint::new("interval_secs", &fields.interval),
+        Hint::new("debounce_secs", &fields.debounce),
+    ];
+
     let save = Button::with_label("Save");
+    let save_hints = hints.clone();
     let save_fields = fields.clone();
     let save_actions = actions.clone();
     let save_reported = Rc::clone(&reported);
     let save_parent = root.clone();
     save.connect_clicked(move |_| {
         let keys = save_fields.read();
+        let refused = invalid(&keys);
+        show(&save_hints, refused.as_ref());
+        if refused.is_some() {
+            return;
+        }
         let move_ = moved(&save_reported.borrow(), &keys);
         if move_ == Move::None {
             let _ = save_actions.send(Action::SaveSettings(keys));
@@ -287,25 +374,47 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     let close = root.clone();
     cancel.connect_clicked(move |_| close.set_visible(false));
 
+    // The line for a failure that belongs to no field, for example a daemon
+    // that does not run.
+    let error = error_line();
+
+    // The file holds every key, also the ones the dialog has no field for,
+    // and it is the only fix while the daemon refuses to start. The desktop
+    // picks the editor for the file type.
+    let open_file = Button::with_label("Open config file");
+    open_file.set_hexpand(true);
+    open_file.set_halign(Align::End);
+    let open_parent = root.clone();
+    let open_error = error.clone();
+    open_file.connect_clicked(move |_| {
+        let file = gio::File::for_path(nimbusd::config::default_file());
+        let shown = open_error.clone();
+        gtk::FileLauncher::new(Some(&file)).launch(
+            Some(&open_parent),
+            gio::Cancellable::NONE,
+            move |opened| {
+                if let Err(err) = opened {
+                    shown.set_text(&format!("Cannot open the config file: {err}"));
+                    shown.set_visible(true);
+                }
+            },
+        );
+    });
+
     let buttons = GtkBox::new(Orientation::Horizontal, 8);
-    buttons.set_halign(Align::Start);
     buttons.append(&save);
     buttons.append(&cancel);
-
-    let error = Label::new(None);
-    error.set_xalign(0.0);
-    error.set_wrap(true);
-    error.set_visible(false);
+    buttons.append(&open_file);
 
     let body = GtkBox::new(Orientation::Vertical, 12);
     body.set_margin_top(12);
     body.set_margin_bottom(12);
     body.set_margin_start(12);
     body.set_margin_end(12);
-    body.append(&row("Remote", &fields.remote));
-    body.append(&row("Local folder", &fields.local));
-    body.append(&row("Interval in seconds", &fields.interval));
-    body.append(&row("Quiet time in seconds", &fields.debounce));
+    body.append(&hints[0].row("Remote"));
+    body.append(&hints[1].row("Local folder"));
+    body.append(&hints[2].row("Interval in seconds"));
+    body.append(&hints[3].row("Quiet time in seconds"));
     body.append(&row("Extra rclone flags", &fields.flags));
     body.append(&error);
     body.append(&buttons);
@@ -314,6 +423,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     App {
         root,
         fields,
+        hints,
         error,
         reported,
     }
@@ -329,7 +439,7 @@ fn confirm(parent: &Window, before: &Settings, keys: &Settings, actions: &Sender
     let dialog = gtk::AlertDialog::builder()
         .message(headline)
         .detail(detail)
-        .buttons(["_Cancel", "_Save anyway"])
+        .buttons(["_Cancel", "_Save and resync"])
         .default_button(0)
         .cancel_button(0)
         .build();
@@ -387,22 +497,15 @@ mod tests {
         let before = keys("drive", "/srv/notes");
         let after = keys("other", "/srv/notes");
         assert_eq!(moved(&before, &after), Move::Remote);
-        let (headline, detail) = warning(&before, &after);
-        assert!(headline.contains("other:/"), "{headline}");
-        assert!(detail.contains("copies everything again"), "{detail}");
+        assert_eq!(warning(&before, &after).0, "Move the sync to other:/?");
     }
 
-    // The old folder stops starting runs, and the user typed a new one, so the
-    // detail must name the folder that loses that role.
     #[test]
-    fn a_moved_folder_names_the_old_one() {
+    fn a_moved_folder_names_the_new_folder() {
         let before = keys("drive", "/srv/notes");
         let after = keys("drive", "/srv/other");
         assert_eq!(moved(&before, &after), Move::Folder);
-        let (headline, detail) = warning(&before, &after);
-        assert!(headline.contains("/srv/other"), "{headline}");
-        assert!(detail.contains("/srv/notes"), "{detail}");
-        assert!(detail.contains("no longer start a run"), "{detail}");
+        assert_eq!(warning(&before, &after).0, "Move the sync to /srv/other?");
     }
 
     #[test]
@@ -410,24 +513,23 @@ mod tests {
         let before = keys("drive", "/srv/notes");
         let after = keys("other", "/srv/other");
         assert_eq!(moved(&before, &after), Move::Both);
-        let (_, detail) = warning(&before, &after);
-        assert!(detail.contains("whole remote"), "{detail}");
-        assert!(detail.contains("/srv/notes"), "{detail}");
+        assert_eq!(
+            warning(&before, &after).0,
+            "Move the sync to /srv/other and other:/?"
+        );
     }
 
-    // A long run must be expected, because the user waits for it.
+    // The warning is the confirmation for the resync, so it must name what a
+    // resync can overwrite.
     #[test]
-    fn every_warning_says_how_long_it_takes() {
+    fn every_warning_names_the_overwrite() {
         let before = keys("drive", "/srv/notes");
         for after in [
             keys("other", "/srv/notes"),
             keys("drive", "/srv/other"),
             keys("other", "/srv/other"),
         ] {
-            assert!(
-                warning(&before, &after).1.contains("takes a while"),
-                "a long run must be expected"
-            );
+            assert!(warning(&before, &after).1.contains(OVERWRITE));
         }
     }
 
