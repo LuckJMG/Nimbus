@@ -181,8 +181,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     error.set_wrap(true);
     // The stock class takes the error color of the theme.
     error.add_css_class("error");
-    // The line can carry a command and a path, so the user can copy them.
-    error.set_selectable(true);
     error.set_visible(false);
 
     let (sync, _, _) = action_button(SYNC_ICON, "Sync now");
