@@ -85,7 +85,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            remote: String::from("drive"),
+            remote: String::from("drive:/"),
             local: LocalDir::new(Path::new("~/Cloud")),
             paused: false,
             interval_secs: 900,

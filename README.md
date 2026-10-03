@@ -85,8 +85,9 @@ Nimbus, and set the folder to sync.
 
 ### Install Nimbus
 
-1. Create a remote in rclone. Name it `drive`, because that is the default
-   name in Nimbus. A different name works too, if you set it in the config.
+1. Create a remote in rclone. Name it `drive`, because the default remote
+   path in Nimbus is `drive:/`. A different name works too, if you set it in
+   the config.
 
     ```console
     rclone config
@@ -152,7 +153,7 @@ config file itself, and the daemon reads the file on its next start.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remote` | `drive` | The rclone remote, from your rclone config. A bare name, as in `drive`, syncs the whole remote. A name with a folder, as in `drive:/Documents`, syncs that folder only. |
+| `remote` | `drive:/` | The rclone remote, from your rclone config. A bare name, as in `drive`, syncs the whole remote. A name with a folder, as in `drive:/Documents`, syncs that folder only. |
 | `local` | `~/Cloud` | The local folder. The daemon watches this folder. |
 | `paused` | `false` | A run that is active finishes. Later runs wait for a resume. |
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
