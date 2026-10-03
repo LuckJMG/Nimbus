@@ -99,10 +99,8 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Builds the rclone target for the root of the remote, in the form
-    /// `remote:/`. The daemon syncs the whole remote, so no folder is named.
     pub fn remote_path(&self) -> String {
-        format!("{}:/", self.remote)
+        target(&self.remote)
     }
 
     /// Rejects settings that the daemon cannot use. The function returns the
@@ -187,6 +185,18 @@ pub fn settings_of(cfg: &Config) -> Settings {
     }
 }
 
+/// Builds the rclone target for a remote text. A bare name targets the root
+/// of the remote, written `name:/`. A text with a colon already names a
+/// folder, as in `gdrive:/Photos`, so it passes unchanged. The text is not
+/// normalized, because `name:path` and `name:/path` differ on a `local` remote.
+pub fn target(remote: &str) -> String {
+    if remote.contains(':') {
+        remote.to_string()
+    } else {
+        format!("{remote}:/")
+    }
+}
+
 /// Copies the keys from a client into the config.
 ///
 /// The pause and the resync flag stay, because the daemon needs both for its
@@ -197,7 +207,7 @@ pub fn settings_of(cfg: &Config) -> Settings {
 /// Returns true when the remote or the folder moved.
 pub fn apply_settings(cfg: &mut Config, s: &Settings) -> bool {
     let local = LocalDir::new(Path::new(&s.local));
-    let moved = cfg.remote != s.remote || cfg.local.path() != local.path();
+    let moved = target(&cfg.remote) != target(&s.remote) || cfg.local.path() != local.path();
     if moved {
         cfg.resync_pending = true;
     }
@@ -389,6 +399,13 @@ mod tests {
     fn a_new_config_targets_the_root_of_the_remote() {
         let cfg = Config::default();
         assert_eq!(cfg.remote_path(), "drive:/");
+    }
+
+    #[test]
+    fn a_remote_with_a_folder_targets_that_folder() {
+        assert_eq!(target("gdrive:/Photos"), "gdrive:/Photos");
+        assert_eq!(target("gdrive:Photos"), "gdrive:Photos");
+        assert_eq!(target("gdrive"), "gdrive:/");
     }
 
     // A removed key must stop the daemon with words the user can act on. A

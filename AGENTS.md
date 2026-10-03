@@ -1,7 +1,8 @@
 # Nimbus
 
-A Google Drive sync tool for Linux. A daemon runs `rclone bisync` on a schedule and
-when files change. A GTK4 tray client talks to it over D-Bus.
+A cloud sync tool for Linux that wraps rclone. It syncs with any rclone remote.
+A daemon runs `rclone bisync` on a schedule and when files change. A GTK4 tray
+client talks to it over D-Bus.
 
 ## State
 
@@ -31,8 +32,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 129 tests pass today: 3 in `nimbus-ipc`, 83 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 38 in `nimbus`.
+runs the same three. 131 tests pass today: 3 in `nimbus-ipc`, 84 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 39 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -69,9 +70,10 @@ remote = /tmp/scratch/remote
 CONF
 ```
 
-The daemon targets the root of the remote, so the remote dir itself is the
-destination and it must exist before the first run. Google Drive needs no
-folder created, so this affects test remotes only.
+A bare `remote` targets the root of the remote, so the remote dir itself is
+the destination and it must exist before the first run. A `remote` with a
+folder, as in `drive:/sub`, targets that folder, and it must exist too. Some remotes, for example
+Google Drive, create the folder themselves.
 
 Write the scratch config before the first start. The default `local` is
 `~/Cloud`, and on a machine where that folder exists, a first start does not
@@ -150,7 +152,7 @@ on the assumption they are decoration.
 For a live test, a `local` rclone remote with no root resolves `name:path` against
 the **process** working directory, and the destination folder must already exist.
 Otherwise every run fails with "directory not found" and the state stays `error`.
-Google Drive creates folders, so this affects test remotes only.
+Some remotes, for example Google Drive, create the folder themselves.
 
 Put one file in the local folder before the first run. A resync of two empty
 folders leaves an empty listing, and rclone then answers the next run with
@@ -334,6 +336,12 @@ same check on the typed keys before Save sends them, and `Hints` shows the
 reason under the field that holds the key. The daemon checks again, because
 the dialog is not the only client. A refusal that belongs to no field, such as
 a daemon that does not run, goes to the line above the buttons.
+
+`target` in `config.rs` turns the `remote` text into the rclone target. A
+bare name gets `:/`, and a text with a colon passes unchanged. Do not
+normalize the colon form. On a `local` remote, `name:path` resolves against
+the working directory and `name:/path` does not. Both move checks compare
+targets, so `drive` and `drive:/` are the same root and cost no resync.
 
 The dialog is built once and reused. A rebuild would throw away a half-typed
 value, and it would leave the panel with two windows for one click.

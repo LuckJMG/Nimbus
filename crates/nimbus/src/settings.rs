@@ -8,7 +8,7 @@ use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, DropDown, Entry, Label, Orientation, SpinButton, Window};
 
 use nimbus_ipc::Settings;
-use nimbusd::config::{Config, Invalid, apply_settings, settings_of};
+use nimbusd::config::{Config, Invalid, apply_settings, settings_of, target};
 
 use crate::view::Action;
 
@@ -225,7 +225,7 @@ pub enum Move {
 /// compares the same two. A trailing slash or a written-out home mark keeps the
 /// folder, so the dialog must not warn about a save that costs nothing.
 pub fn moved(before: &Settings, after: &Settings) -> Move {
-    let remote = before.remote != after.remote;
+    let remote = target(&before.remote) != target(&after.remote);
     let folder = folder_of(&before.local) != folder_of(&after.local);
     match (remote, folder) {
         (false, false) => Move::None,
@@ -248,10 +248,9 @@ fn folder_of(raw: &str) -> PathBuf {
 }
 
 /// The question for a save that moves the sync, or `None` for a save that
-/// moves nothing. The daemon targets the root of the remote, so the question
-/// names the same place that a run will use.
+/// moves nothing. The question names the same target that a run will use.
 pub fn warning(before: &Settings, after: &Settings) -> Option<String> {
-    let remote = format!("{}:/", after.remote);
+    let remote = target(&after.remote);
     let target = match moved(before, after) {
         Move::None => return None,
         Move::Remote => remote,
@@ -320,8 +319,8 @@ impl App {
 /// theme of the desktop. The window sets no title bar, for the same reason as
 /// the status window.
 ///
-/// The dialog holds no folder in the remote. The daemon syncs the root of the
-/// remote, so there is nothing to choose.
+/// The Remote path field takes a bare name, which syncs the root of the remote, or
+/// a name with a folder, as in `gdrive:/Photos`, which syncs that folder.
 ///
 /// The pause and the resync flag have no field either. The pause is on the menu
 /// and the status window, and two controls for one flag would disagree.
@@ -372,7 +371,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         &dim,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    fields.remote.set_placeholder_text(Some("drive"));
+    fields.remote.set_placeholder_text(Some("drive:/"));
     fields.local.set_placeholder_text(Some("~/Cloud"));
     fields
         .flags
@@ -455,7 +454,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     body.set_margin_bottom(12);
     body.set_margin_start(12);
     body.set_margin_end(12);
-    body.append(&hints[0].row("Remote"));
+    body.append(&hints[0].row("Remote path"));
     body.append(&hints[1].row("Local folder"));
     body.append(&hints[2].row("Interval in seconds"));
     body.append(&hints[3].row("Quiet time in seconds"));
@@ -560,6 +559,20 @@ mod tests {
         assert_eq!(
             warning(&before, &after).as_deref(),
             Some("Move the sync to other:/?")
+        );
+    }
+
+    // A folder in the remote is a different listing, so it costs a resync. A
+    // bare name and the same name with `:/` open the same root.
+    #[test]
+    fn a_folder_in_the_remote_is_a_move() {
+        let before = keys("drive", "/srv/notes");
+        assert_eq!(moved(&before, &keys("drive:/", "/srv/notes")), Move::None);
+        let after = keys("drive:/Photos", "/srv/notes");
+        assert_eq!(moved(&before, &after), Move::Remote);
+        assert_eq!(
+            warning(&before, &after).as_deref(),
+            Some("Move the sync to drive:/Photos?")
         );
     }
 
