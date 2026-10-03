@@ -199,29 +199,18 @@ fn folder_of(raw: &str) -> PathBuf {
     }
 }
 
-/// What a resync risks. The settings warning and the resync dialog both say it,
-/// because each one is the confirmation for a resync.
-pub const OVERWRITE: &str = "Where a file differs, the local copy replaces the remote copy.";
-
-/// The headline and the detail for one save.
-///
-/// The two parts exist because `AlertDialog` takes two fields and draws them at
-/// different sizes. The headline names the change, and the detail names the
-/// cost.
-pub fn warning(before: &Settings, after: &Settings) -> (String, String) {
-    // The daemon targets the root of the remote, so the headline names the
-    // same place that a run will use.
+/// The question for a save that moves the sync, or `None` for a save that
+/// moves nothing. The daemon targets the root of the remote, so the question
+/// names the same place that a run will use.
+pub fn warning(before: &Settings, after: &Settings) -> Option<String> {
     let remote = format!("{}:/", after.remote);
     let target = match moved(before, after) {
-        Move::None => return (String::new(), String::new()),
+        Move::None => return None,
         Move::Remote => remote,
         Move::Folder => after.local.clone(),
         Move::Both => format!("{} and {remote}", after.local),
     };
-    (
-        format!("Move the sync to {target}?"),
-        format!("The next run is a full resync. {OVERWRITE}"),
-    )
+    Some(format!("Move the sync to {target}?"))
 }
 
 fn text(field: &Entry, value: &str) {
@@ -435,11 +424,12 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
 /// and the detail carry one idea each. A save that moves nothing never reaches
 /// this function, because the caller checks with `moved` first.
 fn confirm(parent: &Window, before: &Settings, keys: &Settings, actions: &Sender<Action>) {
-    let (headline, detail) = warning(before, keys);
+    let Some(question) = warning(before, keys) else {
+        return;
+    };
     let dialog = gtk::AlertDialog::builder()
-        .message(headline)
-        .detail(detail)
-        .buttons(["_Cancel", "_Save and resync"])
+        .message(question)
+        .buttons(["_Cancel", "_Save"])
         .default_button(0)
         .cancel_button(0)
         .build();
@@ -475,7 +465,7 @@ mod tests {
     fn a_save_of_the_same_keys_needs_no_warning() {
         let before = keys("drive", "/srv/notes");
         assert_eq!(moved(&before, &before.clone()), Move::None);
-        assert_eq!(warning(&before, &before), (String::new(), String::new()));
+        assert_eq!(warning(&before, &before), None);
     }
 
     // A timer change costs nothing, because the listing still fits.
@@ -487,7 +477,7 @@ mod tests {
             ..before.clone()
         };
         assert_eq!(moved(&before, &after), Move::None);
-        assert_eq!(warning(&before, &after).0, "");
+        assert_eq!(warning(&before, &after), None);
     }
 
     // The headline must name where the sync goes, so the user reads the change
@@ -497,7 +487,10 @@ mod tests {
         let before = keys("drive", "/srv/notes");
         let after = keys("other", "/srv/notes");
         assert_eq!(moved(&before, &after), Move::Remote);
-        assert_eq!(warning(&before, &after).0, "Move the sync to other:/?");
+        assert_eq!(
+            warning(&before, &after).as_deref(),
+            Some("Move the sync to other:/?")
+        );
     }
 
     #[test]
@@ -505,7 +498,10 @@ mod tests {
         let before = keys("drive", "/srv/notes");
         let after = keys("drive", "/srv/other");
         assert_eq!(moved(&before, &after), Move::Folder);
-        assert_eq!(warning(&before, &after).0, "Move the sync to /srv/other?");
+        assert_eq!(
+            warning(&before, &after).as_deref(),
+            Some("Move the sync to /srv/other?")
+        );
     }
 
     #[test]
@@ -514,23 +510,9 @@ mod tests {
         let after = keys("other", "/srv/other");
         assert_eq!(moved(&before, &after), Move::Both);
         assert_eq!(
-            warning(&before, &after).0,
-            "Move the sync to /srv/other and other:/?"
+            warning(&before, &after).as_deref(),
+            Some("Move the sync to /srv/other and other:/?")
         );
-    }
-
-    // The warning is the confirmation for the resync, so it must name what a
-    // resync can overwrite.
-    #[test]
-    fn every_warning_names_the_overwrite() {
-        let before = keys("drive", "/srv/notes");
-        for after in [
-            keys("other", "/srv/notes"),
-            keys("drive", "/srv/other"),
-            keys("other", "/srv/other"),
-        ] {
-            assert!(warning(&before, &after).1.contains(OVERWRITE));
-        }
     }
 
     // The daemon compares the folder that rclone opens, so a trailing slash

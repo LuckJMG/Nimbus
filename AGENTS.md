@@ -31,8 +31,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 127 tests pass today: 3 in `nimbus-ipc`, 79 in the `nimbusd`
-library, 5 in the `nimbusd` binary, and 40 in `nimbus`.
+runs the same three. 128 tests pass today: 3 in `nimbus-ipc`, 81 in the `nimbusd`
+library, 5 in the `nimbusd` binary, and 39 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -251,13 +251,16 @@ daemon never starts one without a confirmation. `wants_run` refuses every run
 while `resync_pending` is set and `confirmed` is not, and it reports the phase
 `resync`. The phase is a string on the wire, so the signature stays `(sdts)`.
 
-Two things confirm a resync:
+Only the `Resync` method confirms a resync. The window sends it after its
+dialog. A move in the settings dialog asks only about the move, and the window
+then asks for the resync like any other.
 
-- The `Resync` method, which the window sends after its dialog.
-- A `SetSettings` call that moves the remote or the folder. The tray sends a
-  move only after the "Save and resync" dialog, so a second question would ask
-  the same thing twice. The move also starts the run, because nothing else
-  would until the next interval.
+In the `resync` phase, `last_error` carries the reason, so the window shows it
+and the resync dialog names it. The engine keeps one of three texts in
+`resync_reason`: no record, a move, or a lost record. A restart forgets the
+cause, so a fresh engine uses the text that holds for every cause. A failed
+resync keeps its rclone error instead, because that error says why the last
+attempt did not work.
 
 `confirmed` lives in memory and clears after every finished run. A restart or
 a failed resync therefore asks again. `--resync` follows `resync_pending` only,
@@ -304,7 +307,7 @@ Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 A moved `remote` or `local` has no bisync listing, because rclone names its
 listing after the pair of paths. So `apply_settings` raises `resync_pending`
 and returns true, which costs one full pass. The engine takes that return
-value as the confirmation of the resync. The comparison is on the folder that rclone opens,
+value to set the reason for the resync. The comparison is on the folder that rclone opens,
 because a text change that keeps the folder must not cost a resync.
 
 A refusal arrives as a `zbus::Error::MethodError` named `InvalidArgs`, and its

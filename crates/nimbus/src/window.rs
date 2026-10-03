@@ -130,14 +130,14 @@ impl App {
     }
 }
 
-/// Asks before a resync. Cancel is the default, so a stray Enter does
-/// nothing.
-fn confirm_resync(parent: &Window, actions: &Sender<Action>) {
+/// Asks before a resync. The reason comes first, because it says why the
+/// question exists. Cancel is the default, so a stray Enter does nothing.
+fn confirm_resync(parent: &Window, reason: &str, actions: &Sender<Action>) {
     let dialog = gtk::AlertDialog::builder()
         .message("Resync both sides?")
         .detail(format!(
-            "Files on one side only are copied to the other. {}",
-            crate::settings::OVERWRITE
+            "{reason} Files on one side only are copied to the other. Where a \
+             file differs, the local copy replaces the remote copy."
         ))
         .buttons(["_Cancel", "_Resync"])
         .default_button(0)
@@ -191,9 +191,13 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
 
     let (resync, _, _) = action_button(SYNC_ICON, "Resync");
     resync.set_visible(false);
+    // In the resync phase the error line holds the reason from the daemon.
     let resync_actions = actions.clone();
     let resync_parent = root.clone();
-    resync.connect_clicked(move |_| confirm_resync(&resync_parent, &resync_actions));
+    let resync_reason = error.clone();
+    resync.connect_clicked(move |_| {
+        confirm_resync(&resync_parent, &resync_reason.text(), &resync_actions);
+    });
 
     let (pause, pause_icon, pause_text) = action_button(PAUSE_ICON, "Pause");
     let pause_actions = actions.clone();

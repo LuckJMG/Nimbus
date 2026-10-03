@@ -153,8 +153,8 @@ pause overwrites your edit. Use the Start daemon button in the window after the
 edit.
 
 A moved `remote` or `local` has no bisync listing, so the next run is a full
-resync. The dialog asks before the save, and the "Save and resync" button
-confirms the resync.
+resync. The dialog asks before it saves the move. The window then asks for the
+resync, as for every other resync.
 
 ## The D-Bus API
 
@@ -172,8 +172,8 @@ Any client can read the state and send the same commands.
 The four values of the signature are the phase as a string, the progress as a
 double, the time of the last finished run as a Unix timestamp, and the last
 error as a string. The phase is one of `idle`, `syncing`, `paused`, `error`, or
-`resync`. In `resync`, the daemon waits until a client calls `Resync`. A
-`SetSettings` call that moves the remote or the folder also confirms it.
+`resync`. In `resync`, the daemon waits until a client calls `Resync`, and the
+error string holds the reason for the resync.
 The progress runs from 0.0 to 1.0 and is zero while the daemon is idle.
 
 ```console

@@ -30,6 +30,13 @@ pub enum Event {
     Resync,
 }
 
+/// The reasons for a resync, for the user. A resync is pending only when rclone
+/// has no usable record of the last sync between the two places.
+const NO_RECORD: &str = "Nimbus has no record of a sync between this folder and the remote.";
+const MOVED: &str =
+    "The folder or the remote changed, so Nimbus has no record of a sync between them.";
+const LOST: &str = "The last sync stopped before it saved its record of the files.";
+
 /// The state machine of the daemon. This struct decides when a run starts and
 /// what the state reports. Every field is private, so the state cannot change
 /// without this struct changing it.
@@ -44,6 +51,9 @@ pub struct Engine {
     /// The user confirmed the pending resync. It covers one run, and the
     /// daemon forgets it on a restart, so every resync has its own answer.
     confirmed: bool,
+    /// Why the pending resync is needed. The state carries it in the error
+    /// field, so the window can name it in the resync dialog.
+    resync_reason: &'static str,
 }
 
 impl Engine {
@@ -68,6 +78,9 @@ impl Engine {
             last_finish: None,
             dirty: false,
             confirmed: false,
+            // A restart forgets the cause, so the reason names the fact that
+            // holds for every cause.
+            resync_reason: NO_RECORD,
         }
     }
 
@@ -92,6 +105,7 @@ impl Engine {
                 self.running = false;
                 self.last_finish = Some(now);
                 self.state.progress = 0.0;
+                self.resync_reason = LOST;
                 if !self.cfg.resync_pending {
                     self.cfg.resync_pending = true;
                     self.dirty = true;
@@ -116,6 +130,11 @@ impl Engine {
         // so it waits for the user instead of a timer.
         if self.cfg.resync_pending && !self.confirmed {
             self.state.phase = Phase::Resync;
+            // A failed resync keeps its error, because the error says why the
+            // last attempt did not work.
+            if self.state.last_error.is_empty() {
+                self.state.last_error = String::from(self.resync_reason);
+            }
             return false;
         }
         let quiet = Duration::from_secs(self.cfg.debounce_secs);
@@ -163,12 +182,12 @@ impl Engine {
     /// Takes the keys from a client. The shared function keeps the pause and
     /// the resync flag, so the daemon owns both.
     ///
-    /// A client sends a move only after the user confirmed the resync that the
-    /// move needs, so the move counts as that confirmation and starts it.
+    /// A move needs a resync, and the resync waits for the user like any other.
     fn set_settings(&mut self, settings: &Settings) {
         if apply_settings(&mut self.cfg, settings) {
-            self.confirmed = true;
-            self.run_wanted = true;
+            self.resync_reason = MOVED;
+            // The reason replaces an older message on the next gate check.
+            self.state.last_error = String::new();
         }
         self.dirty = true;
     }
@@ -538,10 +557,10 @@ mod tests {
         assert!(!e.wants_run(at), "the failed resync asks again");
     }
 
-    // The tray sends a move only after the user confirmed the resync in the
-    // settings dialog, so a second question would ask the same thing twice.
+    // A move needs a resync, and the window asks for it with the reason. The
+    // settings dialog asks only about the move.
     #[test]
-    fn a_moved_folder_confirms_its_resync() {
+    fn a_moved_folder_asks_for_a_resync() {
         let at = Instant::now();
         let mut e = engine(|_| {});
         assert!(e.wants_run(at));
@@ -557,8 +576,38 @@ mod tests {
             at,
             UNIX,
         );
-        assert!(e.config().resync_pending);
-        assert!(e.wants_run(at), "the move confirms and starts the resync");
+        e.on_event(Event::SyncNow, at, UNIX);
+        assert!(!e.wants_run(at), "the move is not a confirmation");
+        assert_eq!(e.snapshot().phase, Phase::Resync);
+        assert_eq!(e.snapshot().last_error, MOVED);
+    }
+
+    // The resync dialog names the cause, so each path must set its own reason.
+    #[test]
+    fn a_lost_record_names_its_reason() {
+        let at = Instant::now();
+        let mut e = engine(|_| {});
+        assert!(e.wants_run(at));
+        e.on_event(Event::NeedsResync, at, UNIX);
+        assert!(!e.wants_run(at));
+        assert_eq!(e.snapshot().last_error, LOST);
+        let mut fresh = engine(|cfg| cfg.resync_pending = true);
+        assert!(!fresh.wants_run(at));
+        assert_eq!(fresh.snapshot().last_error, NO_RECORD);
+    }
+
+    // A failed resync keeps the rclone error, because it says why the last
+    // attempt did not work.
+    #[test]
+    fn a_failed_resync_keeps_its_error() {
+        let at = Instant::now();
+        let mut e = engine(|cfg| cfg.resync_pending = true);
+        e.on_event(Event::Resync, at, UNIX);
+        assert!(e.wants_run(at));
+        done(&mut e, at, Outcome::Failed(7), &["the remote is gone"]);
+        assert!(!e.wants_run(at));
+        assert_eq!(e.snapshot().phase, Phase::Resync);
+        assert_eq!(e.snapshot().last_error, "the remote is gone");
     }
 
     // A confirmation with nothing to confirm must not arm a later resync.
