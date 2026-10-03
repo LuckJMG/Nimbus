@@ -196,7 +196,9 @@ proxy reports a stale state forever.
 **The tray says "The daemon is not running".** The unit is not running. Run
 `systemctl --user status nimbusd.service` and read `journalctl --user -u
 nimbusd.service`. A bad config makes the daemon stop on purpose, so the unit
-shows as inactive rather than restarting.
+shows as inactive rather than restarting. The daemon also shows the reason as a
+desktop notification titled "Nimbus did not start". If Do Not Disturb is on,
+the notification is in the notification history.
 
 **The daemon says "another daemon already holds io.github.luckjmg.nimbus".**
 Two daemons are running. Only one can own the name. Stop the other one, then

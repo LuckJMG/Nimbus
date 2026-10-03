@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -114,6 +115,40 @@ struct Turn {
     state: State,
 }
 
+/// Shows a refusal as a desktop notification. The daemon starts at login with
+/// no terminal, so the journal is the only other place the text reaches.
+///
+/// A desktop without a notification server loses the message, and the line on
+/// stderr stays. The timeout is zero, so the notification stays until the user
+/// closes it. A login hides a short notification behind the desktop start.
+fn notify_refusal(body: &str) {
+    let hints = HashMap::from([(
+        "desktop-entry",
+        zbus::zvariant::Value::from("io.github.luckjmg.Nimbus"),
+    )]);
+    let sent = zbus::blocking::Connection::session().and_then(|conn| {
+        conn.call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &(
+                "Nimbus",
+                0u32,
+                "nimbus-sync-symbolic",
+                "Nimbus did not start",
+                body,
+                Vec::<&str>::new(),
+                hints,
+                0i32,
+            ),
+        )
+    });
+    if let Err(err) = sent {
+        eprintln!("nimbusd: the desktop notification failed: {err}");
+    }
+}
+
 fn main() -> Result<()> {
     // A config that does not parse is a bad config too, so it takes the same
     // clean refusal as one that fails the check.
@@ -126,6 +161,10 @@ fn main() -> Result<()> {
                 config::default_file().display()
             );
             eprintln!("nimbusd: fix the settings, then start the daemon again");
+            notify_refusal(&format!(
+                "{err}\n\nThe config file is {}. Fix it, then run: systemctl --user restart nimbusd",
+                config::default_file().display()
+            ));
             // A clean refusal exits with zero. Only the user can fix the
             // settings, so a restart would fail in the same way and fill the
             // journal.

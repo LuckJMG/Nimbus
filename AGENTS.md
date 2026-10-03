@@ -475,6 +475,16 @@ that another daemon holds. Both exit with zero, so `Restart=on-failure` leaves
 the unit stopped instead of restarting it every few seconds. Every other start
 failure keeps its non-zero code, so systemd retries.
 
+A config that does not parse is a bad config too. It takes the same refusal as
+a config that fails `check`.
+
+The daemon starts at login with no terminal, so a bad config also sends a
+desktop notification through `org.freedesktop.Notifications`. The timeout is
+zero, so the notification stays until the user closes it. On Plasma the name
+is activatable through `plasma_waitforname`, so a call made before the panel
+starts waits for it. A desktop with no notification server loses the
+notification, and the line on stderr stays.
+
 The name check needs care. `request_name_with_flags` returns
 `zbus::Error::NameTaken` for a taken name, not a reply, so the reply check that
 follows it never runs. `name_is_taken` matches the error, and the reply check
