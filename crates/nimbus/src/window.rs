@@ -160,7 +160,20 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
         .application(app)
         .title("Nimbus")
         .default_width(420)
+        // A fixed window still follows its content, so the height grows and
+        // shrinks with the error line.
+        .resizable(false)
         .build();
+    // Breeze rounds the bottom corners of the body, but the frame around it
+    // stays square, so the desktop shows through two small gaps. The rule
+    // covers the whole display, so the settings dialog loses the gaps too.
+    let corners = gtk::CssProvider::new();
+    corners.load_from_data("window { border-radius: 0; }");
+    gtk::style_context_add_provider_for_display(
+        &WidgetExt::display(&root),
+        &corners,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     // Closing the window hides it. The tray keeps running, and a left click
     // brings the window back.
     root.set_hide_on_close(true);
@@ -181,6 +194,9 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     error.set_wrap(true);
     // The stock class takes the error color of the theme.
     error.add_css_class("error");
+    // A wrapped label asks for the width of its whole text. The limit keeps a
+    // long message from widening the window, so the text wraps instead.
+    error.set_max_width_chars(1);
     error.set_visible(false);
 
     let (sync, _, _) = action_button(SYNC_ICON, "Sync now");
