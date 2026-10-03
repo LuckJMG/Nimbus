@@ -282,9 +282,18 @@ because a unit test calls the engine directly and never involves a second thread
 ## The settings dialog
 
 The tray holds two windows: `window.rs` for the status and `settings.rs` for
-the keys. The daemon owns the config file and stays the only writer, because it
-writes that file on every pause toggle and on every resync flag change. The
-dialog talks to the daemon over D-Bus instead of touching the file.
+the keys. The daemon owns the config file and stays the only writer while it
+runs, because it writes that file on every pause toggle and on every resync
+flag change. The dialog talks to the daemon over D-Bus instead of touching the
+file.
+
+When no daemon answers, the tray reads and writes the file itself.
+`read_settings` fills the dialog from the file, and `write_settings` saves
+the keys into it, so Save closes the dialog and keeps the edit. Without the
+read, the dialog showed the defaults, and a save wrote them over the file in a
+live run. A move raises `resync_pending`, so the next daemon asks for the
+resync. A file that does not load is not written, and its error goes into the
+dialog.
 
 Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 

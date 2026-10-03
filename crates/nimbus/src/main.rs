@@ -351,15 +351,31 @@ fn start_daemon(proxy: &NimbusProxyBlocking<'_>) {
 }
 
 /// Reads the keys for the dialog.
-///
-/// A daemon that does not run answers with a refusal, so the dialog says why
-/// it cannot open instead of showing empty fields.
 fn open_settings(proxy: &NimbusProxyBlocking<'_>, show: &Sender<Reply>) {
     let reply = match proxy.get_settings() {
         Ok(keys) => Reply::Settings(keys),
-        Err(err) => refuse(err),
+        Err(err) => match refuse(err) {
+            // No daemon answered, so the file holds the keys.
+            Reply::Refused(text) if text.is_empty() => read_settings(),
+            refused => refused,
+        },
     };
     let _ = show.send(reply);
+}
+
+/// Reads the keys from the config file while no daemon runs. Without this,
+/// the dialog shows the defaults, and a save writes them over the file. The
+/// read does not create a missing file, so a missing file gives the defaults.
+fn read_settings() -> Reply {
+    let cfg = if nimbusd::config::default_file().exists() {
+        nimbusd::config::load()
+    } else {
+        Ok(nimbusd::config::Config::default())
+    };
+    match cfg {
+        Ok(cfg) => Reply::Settings(nimbusd::config::settings_of(&cfg)),
+        Err(err) => Reply::Refused(format!("{err:#}")),
+    }
 }
 
 /// Writes the keys. The daemon checks them, so a refusal arrives here and goes
@@ -369,11 +385,30 @@ fn save_settings(
     proxy: &NimbusProxyBlocking<'_>,
     show: &Sender<Reply>,
 ) {
-    let reply = match proxy.set_settings(keys) {
+    let reply = match proxy.set_settings(keys.clone()) {
         Ok(()) => Reply::Saved,
-        Err(err) => refuse(err),
+        Err(err) => match refuse(err) {
+            // No daemon answered, so no daemon writes the file either.
+            Reply::Refused(text) if text.is_empty() => write_settings(&keys),
+            refused => refused,
+        },
     };
     let _ = show.send(reply);
+}
+
+/// Writes the keys into the config file while no daemon runs, so a save never
+/// drops an edit. A move raises the resync flag, so the next daemon asks for
+/// the resync. A file that does not load stays as it is, and its error goes
+/// into the dialog.
+fn write_settings(keys: &nimbus_ipc::Settings) -> Reply {
+    let written = nimbusd::config::load().and_then(|mut cfg| {
+        nimbusd::config::apply_settings(&mut cfg, keys);
+        nimbusd::config::save(&cfg)
+    });
+    match written {
+        Ok(()) => Reply::Saved,
+        Err(err) => Reply::Refused(format!("{err:#}")),
+    }
 }
 
 /// The error name of a daemon refusal. The bus answers a call to a missing

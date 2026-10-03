@@ -146,6 +146,9 @@ The Settings row opens a dialog for `remote`, `local`, `interval_secs`,
 separated by spaces. The daemon takes the new keys at once and writes the file.
 A time above 86400 needs the file, because the dialog stops at one day.
 
+When the daemon is not running, the dialog reads and writes the config file
+itself, so a save keeps your edit. The daemon reads it on its next start.
+
 The Open config file button opens the file in the editor that the desktop
 picks for it. Stop the daemon before you edit the file. A running daemon does
 not read the file again, and it writes the file on every pause, so a later
