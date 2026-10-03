@@ -253,6 +253,10 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> App {
     buttons.append(&settings);
 
     let body = GtkBox::new(Orientation::Vertical, 12);
+    // GTK focuses the first focusable widget when the window opens, and Breeze
+    // draws a focused button as selected. The body takes that first focus and
+    // draws nothing, and Tab still reaches every button.
+    body.set_focusable(true);
     body.set_margin_top(12);
     body.set_margin_bottom(12);
     body.set_margin_start(12);
