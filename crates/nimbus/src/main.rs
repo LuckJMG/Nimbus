@@ -178,9 +178,15 @@ fn first_activation(
 /// - Adwaita dims a placeholder, but Breeze draws it in the full text color,
 ///   so an example reads as the current value. The rule fades the theme color
 ///   instead of setting one.
+/// - Breeze draws the text of a progress bar directly on the trough, so the
+///   time of the last sync touches the bar. The margin separates them.
 fn install_css(display: &gtk::gdk::Display) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_data("window { border-radius: 0; } placeholder { opacity: 0.5; }");
+    provider.load_from_data(
+        "window { border-radius: 0; } \
+         placeholder { opacity: 0.5; } \
+         progressbar > text { margin-bottom: 4px; }",
+    );
     gtk::style_context_add_provider_for_display(
         display,
         &provider,
@@ -189,7 +195,8 @@ fn install_css(display: &gtk::gdk::Display) {
 }
 
 /// The one main loop timer. It moves the windows when the worker asks, and it
-/// rewrites the labels when the view moved.
+/// hands the view to the status window, which skips a redraw that changes
+/// nothing.
 ///
 /// One timer serves both windows, because a second timer would need a second
 /// glib source and both read the same channels.
@@ -205,16 +212,12 @@ fn refresh_loop(
     weak_root.set(Some(&window.root));
     let view = Arc::clone(view);
     let window = Rc::clone(window);
-    let mut last: Option<View> = None;
     gtk::glib::timeout_add_local(TICK, move || {
         while let Ok(reply) = requests.try_recv() {
             deliver(reply, &weak_root, &dialog);
         }
         let current = view.lock().expect("the view lock").clone();
-        if last.as_ref() != Some(&current) {
-            window.apply(&current, unix_now());
-            last = Some(current);
-        }
+        window.apply(&current, unix_now());
         ControlFlow::Continue
     });
 }

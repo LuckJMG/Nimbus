@@ -316,6 +316,9 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> SettingsDialog 
         .application(app)
         .title("Nimbus settings")
         .default_width(460)
+        // A fixed window still follows its content, so the height grows and
+        // shrinks with the error lines.
+        .resizable(false)
         .build();
     // Closing the dialog hides it. The tray keeps running, and the menu opens
     // the dialog again.

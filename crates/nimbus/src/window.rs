@@ -33,11 +33,24 @@ fn ago(seconds: u64) -> String {
 
 /// States how long ago the last run ended. A clock that moved backwards gives
 /// a difference of zero, which reads as "just now".
-fn ago_since(unix: u64, now: u64) -> String {
+fn synced(unix: u64, now: u64) -> String {
     if unix == 0 {
-        return String::from("no run yet");
+        return String::from("not synced yet");
     }
-    ago(now.saturating_sub(unix))
+    format!("synced {}", ago(now.saturating_sub(unix)))
+}
+
+/// The fill and the text of the progress bar. Only a run fills the bar and
+/// shows a percent. In every other phase the bar is empty and names the last
+/// run, so a paused run does not leave a half-full bar behind.
+fn bar(view: &View, now: u64) -> (f64, String) {
+    match view {
+        View::Ready(state) if state.phase == Phase::Syncing => {
+            (state.progress, format!("{:.0}%", state.progress * 100.0))
+        }
+        View::Ready(state) => (0.0, synced(state.last_run, now)),
+        View::Offline(_) => (0.0, String::from("no connection")),
+    }
 }
 
 fn pause_label(view: &View) -> &'static str {
@@ -96,7 +109,6 @@ pub struct StatusWindow {
     pub root: Window,
     phase: Label,
     progress: ProgressBar,
-    last_run: Label,
     error: Label,
     sync: Button,
     resync: Button,
@@ -107,13 +119,23 @@ pub struct StatusWindow {
     /// The text of the error line. In the resync phase it holds the reason
     /// from the daemon, and the resync dialog names it.
     resync_reason: Rc<RefCell<String>>,
+    /// The view and the bar text that the window shows now.
+    shown: RefCell<Option<(View, String)>>,
 }
 
 impl StatusWindow {
-    /// Rewrites every field. The caller checks for a change first, so this runs
-    /// only when the view moved. The heading takes the short name, because the
+    /// Rewrites every field when the view or the bar text moved. The timer
+    /// calls this on every tick, because the time of the last sync ages while
+    /// the view stays the same. The heading takes the short name, because the
     /// error line below it carries the message from the daemon.
     pub fn apply(&self, view: &View, now: u64) {
+        let (fraction, text) = bar(view, now);
+        if let Some((shown_view, shown_text)) = &*self.shown.borrow()
+            && shown_view == view
+            && *shown_text == text
+        {
+            return;
+        }
         self.phase.set_text(&status_name(view));
         self.pause_text.set_text(pause_label(view));
         self.pause_icon.set_icon_name(Some(pause_icon(view)));
@@ -127,22 +149,14 @@ impl StatusWindow {
         self.resync.set_visible(resync);
         self.pause.set_visible(!offline);
         self.start.set_visible(offline);
-        let (fraction, text, last_run) = match view {
-            View::Ready(state) => (
-                state.progress,
-                format!("{:.0}%", state.progress * 100.0),
-                state.last_run,
-            ),
-            View::Offline(_) => (0.0, String::from("no connection"), 0),
-        };
         self.progress.set_fraction(fraction);
         self.progress.set_text(Some(&text));
-        self.last_run.set_text(&ago_since(last_run, now));
         let error = error_line(view);
         self.error.set_text(error.unwrap_or_default());
         self.error.set_visible(error.is_some());
         self.resync_reason
             .replace(String::from(error.unwrap_or_default()));
+        self.shown.replace(Some((view.clone(), text)));
     }
 }
 
@@ -193,9 +207,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> StatusWindow {
     let progress = ProgressBar::new();
     progress.set_show_text(true);
     progress.set_text(Some("no connection"));
-
-    let last_run = Label::new(None);
-    last_run.set_xalign(0.0);
 
     let error = Label::new(None);
     error.set_xalign(0.0);
@@ -259,7 +270,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> StatusWindow {
     body.set_margin_end(12);
     body.append(&phase);
     body.append(&progress);
-    body.append(&last_run);
     body.append(&error);
     body.append(&buttons);
     root.set_child(Some(&body));
@@ -268,7 +278,6 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> StatusWindow {
         root,
         phase,
         progress,
-        last_run,
         error,
         sync,
         resync,
@@ -277,6 +286,7 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> StatusWindow {
         pause_icon,
         pause_text,
         resync_reason,
+        shown: RefCell::new(None),
     }
 }
 
@@ -308,19 +318,43 @@ mod tests {
     }
 
     #[test]
-    fn ago_of_zero_means_no_run_yet() {
-        assert_eq!(ago_since(0, 1_700_000_000), "no run yet");
+    fn synced_of_zero_means_no_run_yet() {
+        assert_eq!(synced(0, 1_700_000_000), "not synced yet");
     }
 
     #[test]
-    fn ago_since_uses_the_difference() {
-        assert_eq!(ago_since(1_700_000_000 - 90, 1_700_000_000), "1 minute ago");
+    fn synced_uses_the_difference() {
+        assert_eq!(
+            synced(1_700_000_000 - 90, 1_700_000_000),
+            "synced 1 minute ago"
+        );
     }
 
     // A clock that steps backwards must not produce a negative time.
     #[test]
-    fn ago_of_the_future_stays_sensible() {
-        assert_eq!(ago_since(1_700_000_090, 1_700_000_000), "just now");
+    fn synced_in_the_future_stays_sensible() {
+        assert_eq!(synced(1_700_000_090, 1_700_000_000), "synced just now");
+    }
+
+    // Only a run fills the bar. The fixture carries a ratio of 0.43, which a
+    // paused run can leave behind, and the bar must still be empty.
+    #[test]
+    fn only_a_run_fills_the_bar() {
+        assert_eq!(
+            bar(&ready(Phase::Syncing, ""), 0),
+            (0.43, String::from("43%"))
+        );
+        for phase in [Phase::Idle, Phase::Paused, Phase::Error, Phase::Resync] {
+            assert_eq!(
+                bar(&ready(phase, ""), 0),
+                (0.0, String::from("not synced yet")),
+                "{phase:?}"
+            );
+        }
+        assert_eq!(
+            bar(&View::Offline(String::new()), 0),
+            (0.0, String::from("no connection"))
+        );
     }
 
     #[test]
