@@ -3,11 +3,11 @@ Type=Application
 Name=Nimbus
 GenericName=Cloud sync
 Comment=Sync a local folder with an rclone remote
-Exec=/usr/bin/nimbus
+# A login starts the tray icon and no window.
+Exec=/usr/bin/nimbus --hidden
 Icon=nimbus-idle-symbolic
 Terminal=false
-Categories=Network;FileTransfer;
-Keywords=cloud;drive;sync;backup;rclone;
 # The tray stays up after the window closes, so the shell gets no window to
 # wait for. A false value also leaves no spinning pointer when the start fails.
 StartupNotify=false
+X-GNOME-Autostart-enabled=true

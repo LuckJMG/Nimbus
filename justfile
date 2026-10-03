@@ -32,16 +32,14 @@ install: build
     sudo install -Dm644 data/dbus-1/services/io.github.luckjmg.Nimbus.service {{prefix}}/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sudo install -Dm644 data/applications/io.github.luckjmg.Nimbus.desktop {{prefix}}/share/applications/io.github.luckjmg.Nimbus.desktop
     sudo install -Dm644 -t {{prefix}}/share/icons/hicolor/scalable/apps data/icons/hicolor/scalable/apps/*.svg
-    # The login starts the tray with --hidden, so no window opens.
-    sed 's|^Exec=.*|& --hidden|' data/applications/io.github.luckjmg.Nimbus.desktop \
-        | install -Dm644 /dev/stdin {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
+    install -Dm644 data/autostart/io.github.luckjmg.Nimbus.desktop {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     systemctl --user daemon-reload
     systemctl --user enable --now nimbusd.service
     @echo "The tray starts at the next login, or now with: just run-tray"
 
 # Install into the home directory, with no root.
 install-user: build
-    # The three files carry an absolute path, so the recipe rewrites it. A
+    # The four files carry an absolute path, so the recipe rewrites it. A
     # D-Bus service file expands neither $HOME nor %h, so that path is absolute.
     install -Dm755 target/release/nimbusd {{home}}/.local/bin/nimbusd
     install -Dm755 target/release/nimbus {{home}}/.local/bin/nimbus
@@ -51,8 +49,7 @@ install-user: build
         > {{home}}/.local/share/dbus-1/services/io.github.luckjmg.Nimbus.service
     sed "s|/usr/bin/nimbus|{{home}}/.local/bin/nimbus|" data/applications/io.github.luckjmg.Nimbus.desktop \
         > {{home}}/.local/share/applications/io.github.luckjmg.Nimbus.desktop
-    # The login starts the tray with --hidden, so no window opens.
-    sed "s|^Exec=/usr/bin/nimbus|Exec={{home}}/.local/bin/nimbus --hidden|" data/applications/io.github.luckjmg.Nimbus.desktop \
+    sed "s|/usr/bin/nimbus|{{home}}/.local/bin/nimbus|" data/autostart/io.github.luckjmg.Nimbus.desktop \
         | install -Dm644 /dev/stdin {{home}}/.config/autostart/io.github.luckjmg.Nimbus.desktop
     install -Dm644 -t {{home}}/.local/share/icons/hicolor/scalable/apps data/icons/hicolor/scalable/apps/*.svg
     systemctl --user daemon-reload
