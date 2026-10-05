@@ -38,7 +38,8 @@ newer edit wins and the older edit is deleted. With
 
 Nimbus has two programs. The daemon, `nimbusd`, owns the sync. It watches the
 local folder, keeps an interval, and serves one D-Bus interface. The tray,
-`nimbus`, starts with no daemon and waits for one.
+`nimbus`, starts with no daemon and waits for one. The daemon stops when the
+tray ends, so a panel with no Nimbus icon means that no daemon runs.
 
 ## Who this project is for
 
@@ -293,7 +294,7 @@ The menu has the same commands:
 | Sync now | Starts a run. The item is disabled while a run is active. |
 | Pause | A checkmark item. A tick shows that Nimbus is paused. Click it to pause or resume. |
 | Settings | Opens the Settings dialog. |
-| Quit | Stops the tray. The daemon continues to run. |
+| Quit | Stops the tray. The daemon stops within one second. The window close button only hides the window. |
 
 The Settings dialog edits seven keys of the config file:
 
@@ -338,7 +339,10 @@ To edit the config file by hand:
 
 ### Control Nimbus over D-Bus
 
-Any client can read the state and send the same commands as the tray.
+Any client can read the state and send the same commands as the tray. The
+daemon stops when no tray owns the name `io.github.luckjmg.Nimbus` on the bus.
+A daemon that finds no tray stops after 60 seconds. A client must run while the
+tray runs.
 
 | | |
 | --- | --- |

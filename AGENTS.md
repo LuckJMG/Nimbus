@@ -26,7 +26,9 @@ every commit.
 
 The binaries are `nimbusd` and `nimbus`. The daemon needs a session bus and refuses
 to start when another daemon already holds `io.github.luckjmg.nimbus`. The tray
-starts with no daemon and shows "The daemon is not running".
+starts with no daemon and shows "The daemon is not running". The daemon stops
+when no process owns `io.github.luckjmg.Nimbus`, which is the name of the tray.
+See "The tray owns the daemon" below.
 
 ## Commands
 
@@ -37,8 +39,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 128 tests pass today: 3 in `nimbus-ipc`, 85 in the `nimbusd`
-library, 1 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 129 tests pass today: 3 in `nimbus-ipc`, 85 in the `nimbusd`
+library, 2 in the `nimbusd` binary, and 39 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -51,6 +53,9 @@ cargo test -p nimbusd --lib rclone::tests::parse_progress_reads_the_byte_line
 The unit tests do not cover the bus, the watcher, the panel, or rclone. Those need a
 real run. Set `XDG_CONFIG_HOME` to a scratch directory, because the daemon writes a
 config file on first start.
+
+Start the tray within 60 seconds of the daemon, or the daemon stops. See "The
+tray owns the daemon" below.
 
 Free the bus name first. One daemon owns `io.github.luckjmg.nimbus` in a session,
 so stop an installed one and quit a running tray:
@@ -164,6 +169,25 @@ folders leaves an empty listing, and rclone then answers the next run with
 "Empty prior Path1 listing. Cannot sync to an empty directory." The run after
 that one resyncs and reaches `idle`, so a sandbox that starts empty looks broken
 for two intervals. `just sandbox` writes the seed file.
+
+## The tray owns the daemon
+
+A panel with no Nimbus icon must mean that no daemon runs. The loop in
+`nimbusd/src/main.rs` asks the bus once per tick whether a process owns
+`TRAY_NAME`, and it breaks out of the loop when the answer is no. The return is
+clean, so the unit exits with zero and `Restart=on-failure` leaves it stopped.
+This covers the Quit row, a crash of the tray, and a daemon that someone started
+by hand. A failed bus call leaves the daemon running, because the call says
+nothing about the tray.
+
+A tray that never appeared gets 60 seconds, because the unit starts at login
+and the autostart entry starts the tray later. A tray that appeared and left
+gets no grace. `tray_is_gone` holds both rules.
+
+No switch turns this off. Every manual run therefore needs a tray in the same
+session, or the daemon stops after 60 seconds. This applies to the live check and
+to the crash test below. A test on a private bus needs a process that owns the
+name, for example `gi` with `Gio.bus_own_name`.
 
 ## The crash test
 

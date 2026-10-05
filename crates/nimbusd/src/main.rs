@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use notify::{EventKind, RecursiveMode, Watcher};
 
-use nimbus_ipc::{BUS_NAME, INTERFACE, OBJECT_PATH, State};
+use nimbus_ipc::{BUS_NAME, INTERFACE, OBJECT_PATH, State, TRAY_NAME};
 
 use nimbusd::config;
 use nimbusd::engine::{Engine, Event};
@@ -18,6 +18,10 @@ use nimbusd::service::NimbusService;
 /// The loop wakes at least this often. The loop also wakes on every message,
 /// so the value only sets the slowest response to the quiet time.
 const TICK: Duration = Duration::from_secs(1);
+
+/// How long the daemon waits for a tray that never appeared. The daemon starts
+/// at login, and the tray starts later from the autostart entry.
+const TRAY_GRACE: Duration = Duration::from_secs(60);
 
 /// The seconds since the Unix epoch, which is the unit of `State::last_run`.
 fn unix_now() -> u64 {
@@ -34,6 +38,14 @@ fn unix_now() -> u64 {
 /// events the backend does not describe. The interval covers a missed change.
 fn is_trigger(kind: &EventKind) -> bool {
     kind.is_create() || kind.is_modify() || kind.is_remove()
+}
+
+/// Returns true when the daemon must stop because the tray is gone. A tray
+/// that never appeared gets `TRAY_GRACE`. A tray that appeared and left gets
+/// no grace, because the user closed it or it crashed.
+fn tray_is_gone(present: bool, seen: &mut bool, waited: Duration) -> bool {
+    *seen |= present;
+    !present && (*seen || waited > TRAY_GRACE)
 }
 
 /// Claims the bus name. Returns false when another daemon holds it, because
@@ -184,6 +196,9 @@ fn serve(cfg: config::Config) -> Result<()> {
         .path();
     let mut watcher = watch_folder(&tx, &watching)?;
 
+    let bus = zbus::blocking::fdo::DBusProxy::new(&conn)
+        .context("the daemon cannot reach the bus daemon")?;
+    let (started, mut tray_seen) = (Instant::now(), false);
     let mut last_sent: Option<State> = None;
     loop {
         // The blocking receive must run without the lock. A property read on
@@ -194,6 +209,16 @@ fn serve(cfg: config::Config) -> Result<()> {
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
         };
+        // A tray that ends takes the daemon with it, so a panel with no icon
+        // always means a stopped daemon. The clean return keeps systemd from
+        // restarting the unit. A failed call says nothing about the tray.
+        let name = zbus::names::BusName::try_from(TRAY_NAME).expect("a valid bus name");
+        if let Ok(present) = bus.name_has_owner(name)
+            && tray_is_gone(present, &mut tray_seen, started.elapsed())
+        {
+            eprintln!("nimbusd: the tray is gone, so the daemon stops");
+            break;
+        }
         // Two file changes can arrive in the same tick. The drain applies both
         // before the engine reads the quiet time. The lock lasts for this one
         // statement.
@@ -266,6 +291,16 @@ mod tests {
     // rclone reads the local folder during every run, so a read event that
     // triggers a run starts the next run without end. The catch-all kinds
     // carry no description, and the interval covers a missed change.
+    #[test]
+    fn the_daemon_stops_when_the_tray_leaves_or_never_comes() {
+        let mut seen = false;
+        assert!(!tray_is_gone(false, &mut seen, Duration::ZERO), "grace");
+        assert!(!tray_is_gone(true, &mut seen, Duration::ZERO));
+        assert!(tray_is_gone(false, &mut seen, Duration::ZERO), "tray left");
+        let mut seen = false;
+        assert!(tray_is_gone(false, &mut seen, TRAY_GRACE * 2), "no tray");
+    }
+
     #[test]
     fn only_a_write_event_triggers_a_run() {
         for kind in [

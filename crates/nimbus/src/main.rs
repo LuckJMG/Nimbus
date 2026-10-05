@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use gtk::glib::{ControlFlow, ExitCode, WeakRef};
 use gtk::prelude::*;
 use ksni::blocking::TrayMethods;
-use nimbus_ipc::NimbusProxyBlocking;
+use nimbus_ipc::{NimbusProxyBlocking, TRAY_NAME};
 
 use tray::NimbusTray;
 use view::{Action, Reply, View, is_paused};
@@ -27,8 +27,9 @@ fn unix_now() -> u64 {
 }
 
 /// The application id. GApplication uses it to hand an activation to the
-/// process that already holds the name, which keeps one icon in the panel.
-const APP_ID: &str = "io.github.luckjmg.Nimbus";
+/// process that already holds the name, which keeps one icon in the panel. The
+/// daemon watches the same name, so the daemon stops when the tray ends.
+const APP_ID: &str = TRAY_NAME;
 
 /// The worker reads the state on this period. The engine sends one update for
 /// each whole percent, so a longer period would only add delay.

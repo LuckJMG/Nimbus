@@ -9,6 +9,9 @@ use zbus::zvariant::{OwnedValue, Type, Value};
 pub const BUS_NAME: &str = "io.github.luckjmg.nimbus";
 pub const OBJECT_PATH: &str = "/io/github/luckjmg/nimbus";
 pub const INTERFACE: &str = "io.github.luckjmg.nimbus1";
+/// The name that the tray holds on the bus. The daemon stops when no process
+/// owns it.
+pub const TRAY_NAME: &str = "io.github.luckjmg.Nimbus";
 
 /// The phase of the sync engine.
 ///
