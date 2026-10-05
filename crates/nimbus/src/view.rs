@@ -72,6 +72,7 @@ pub fn status_text(view: &View) -> String {
         Phase::Syncing => format!("Syncing, {:.0}%", state.progress * 100.0),
         Phase::Paused => String::from("Paused"),
         Phase::Resync => String::from("A resync is needed"),
+        Phase::Offline => String::from("No internet connection"),
         Phase::Error if state.last_error.is_empty() => String::from("The last run failed"),
         Phase::Error => state.last_error.clone(),
     }

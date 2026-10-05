@@ -94,7 +94,8 @@ fn watch_folder(events: &Sender<Event>, local: &Path) -> Result<notify::Recommen
 /// What one turn of the loop decided. The caller reads this after it unlocks
 /// the engine, so no side effect ever runs while the lock is held.
 struct Turn {
-    run: Option<config::Config>,
+    /// The config for a run, and true when the run is a probe of the remote.
+    run: Option<(config::Config, bool)>,
     save: Option<config::Config>,
     /// The folder that the watcher must follow. It is `None` on every turn
     /// where the folder did not move, so the watch is never rebuilt for a
@@ -227,9 +228,15 @@ fn serve(cfg: config::Config) -> Result<()> {
             first.into_iter().chain(rx.try_iter()),
             &watching,
         );
-        if let Some(cfg) = turn.run {
+        if let Some((cfg, probe)) = turn.run {
             let (tx, pause) = (tx.clone(), Arc::clone(&pause));
-            std::thread::spawn(move || rclone::run(&cfg, pause, &tx));
+            std::thread::spawn(move || {
+                if probe {
+                    rclone::probe(&cfg, &tx);
+                } else {
+                    rclone::run(&cfg, pause, &tx);
+                }
+            });
         }
         if let Some(cfg) = turn.save {
             config::save(&cfg).context("the daemon cannot write the config file")?;
@@ -257,7 +264,7 @@ fn decide(engine: &mut Engine, events: impl Iterator<Item = Event>, watching: &P
     Turn {
         run: engine
             .start_run_if_due(Instant::now())
-            .then(|| engine.config().clone()),
+            .then(|| (engine.config().clone(), engine.probing())),
         save: engine.take_dirty().then(|| engine.config().clone()),
         // The comparison is on the folder that rclone opens. `Path` equality
         // ignores a trailing slash, so a text change that keeps the folder

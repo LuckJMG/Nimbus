@@ -30,6 +30,9 @@ pub enum Phase {
     /// calls `Resync`. A resync lets the local copy overwrite a remote copy
     /// that differs, so the daemon never starts one on its own.
     Resync,
+    /// The last run failed because the network is down. The daemon starts no
+    /// run until a probe finds the network again.
+    Offline,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Type, Value, OwnedValue)]

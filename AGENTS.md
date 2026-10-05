@@ -39,7 +39,7 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 129 tests pass today: 3 in `nimbus-ipc`, 85 in the `nimbusd`
+runs the same three. 132 tests pass today: 3 in `nimbus-ipc`, 88 in the `nimbusd`
 library, 2 in the `nimbusd` binary, and 39 in `nimbus`.
 
 ```console
@@ -188,6 +188,30 @@ No switch turns this off. Every manual run therefore needs a tray in the same
 session, or the daemon stops after 60 seconds. This applies to the live check and
 to the crash test below. A test on a private bus needs a process that owns the
 name, for example `gi` with `Gio.bus_own_name`.
+
+## The offline phase
+
+A run that dies on a dead network moves the engine to the phase `offline`.
+`run` in `rclone.rs` decides this from the error lines: `is_network_error`
+matches five texts that a live run on rclone 1.74.3 printed with no network, with
+a dead resolver, and with no address. A refused connection is not on the list,
+because a server that is down is not a network that is down. A wrong host name
+also counts as offline, because the resolver says the same words.
+
+While the engine is offline, `start_run_if_due` starts a probe in place of a run.
+A probe is `rclone lsd --max-depth 1` on the remote, every 30 seconds, or at
+once after a Sync now click. A file change and the interval start nothing. Any
+answer except a network error counts as online, and the next run then reports
+the real error, for example a bad token. The gate for the resync comes first, so
+a failed resync still asks again and hides the offline phase.
+
+The tray shows the same icon for `offline` and for a missing daemon, and the
+first row of the menu tells them apart. A live run needs a failing remote, so
+put a script named `rclone` on the `PATH` of the daemon. The script prints
+an `ERROR : ... network is unreachable` line and exits with 1 while a flag file
+exists, and it runs the real `rclone` otherwise. That run showed one `lsd` per
+30 seconds, no `bisync` while the flag existed, and one `bisync` after the flag
+went.
 
 ## The crash test
 
@@ -712,7 +736,7 @@ stays as a second line of defence.
 ## Design limits, not bugs
 
 - A lost connection is repaired on the next run, and only shape C costs a resync, which waits for a confirmation. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
-- A failed run waits for the next `interval_secs` before it retries. There is no separate retry timer, so set `interval_secs` low if the connection is often down.
+- A failed run waits for the next `interval_secs` before it retries, unless the failure is a dead network. Then the daemon probes every 30 seconds. See "The offline phase" above.
 - The watcher sees only the local folder. A change made from another machine arrives on `interval_secs` (default 900), not sooner.
 - `is_trigger` drops `Access` and `Any` events. rclone reads the local folder during every run, so a filter that accepts reads never stops syncing.
 - Pause does not stop a running sync. It skips later runs. The run thread checks the flag between output lines, so a pause lands within about a second.

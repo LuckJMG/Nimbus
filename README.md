@@ -269,10 +269,16 @@ The tray icon and the first row of the menu both show the phase:
 | `paused` | <img src="data/icons/hicolor/scalable/apps/nimbus-paused-symbolic.svg" width="22" alt="The paused icon"> | You paused Nimbus. Later runs wait until you resume. |
 | `error` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The error icon"> | The last run failed. The line below the heading names the error. |
 | `resync` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The resync icon"> | The next run must compare every file. Click Resync, then confirm. |
-| `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | No daemon answers on the bus, so the cloud is offline for Nimbus. The window shows a Start daemon button. |
+| `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | The network is down. The daemon starts no run and checks the remote every 30 seconds. The next run starts when the check works. |
+| no phase | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | No daemon answers on the bus. The window shows a Start daemon button. |
 
-`offline` is the only row without a phase on the bus. No daemon runs, so
-nothing sends one.
+The last row has no phase on the bus. No daemon runs, so nothing sends one.
+The two rows share one icon. The first row of the menu tells them apart:
+"No internet connection" or "The daemon is not running".
+
+A run that fails with a network error moves the daemon to `offline`. The error
+line shows the rclone text. A Sync now click makes the check at once. A file
+change or the interval does not start a run while the phase is `offline`.
 
 The icon has no color of its own, so each desktop paints it with its own
 palette. A host that looks up an icon name in a cache needs a cache rebuild
@@ -355,7 +361,7 @@ tray runs.
 
 The `State` signature holds four values:
 
-- The phase, as a string. The phase is `idle`, `syncing`, `paused`, `error`, or `resync`.
+- The phase, as a string. The phase is `idle`, `syncing`, `paused`, `error`, `resync`, or `offline`.
 - The progress, as a double from 0.0 to 1.0. It is zero while the daemon is idle.
 - The time of the last finished run, as a Unix timestamp.
 - The last error, as a string.
@@ -438,7 +444,7 @@ Other issues:
 | Issue | Solution |
 | --- | --- |
 | The heading reads "Error". | Read the rclone message below the heading, and the daemon log. The daemon tries again on the next interval. |
-| A failed run takes a long time to retry. | A failed run waits for `interval_secs`, because there is no separate retry timer. If the connection is often down, set `interval_secs` to a low value, for example `300`. |
+| A failed run takes a long time to retry. | A run that fails with a network error does not wait for `interval_secs`. The daemon checks the remote every 30 seconds, and it retries when the check works. Any other failed run waits for `interval_secs`. Set `interval_secs` to a low value, for example `300`, if such errors are frequent. |
 | A run on a test remote fails with "directory not found". | Create the destination folder before the first run. Some remotes, for example Google Drive, create the folder themselves. Use an `alias` remote with an absolute path. It is the only test remote that resolves the same way from any working directory. |
 | The tray shows a blank icon. | Rebuild the icon cache. See the commands below the table. |
 

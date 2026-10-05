@@ -9,7 +9,7 @@ use std::sync::mpsc::Sender;
 use crate::config::{self, Config};
 use crate::engine::Event;
 
-/// How a run ended. The three cases reach the tray as different words, so the
+/// How a run ended. The cases reach the tray as different words, so the
 /// run thread names them once instead of passing a bare exit code around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -19,6 +19,8 @@ pub enum Outcome {
     Failed(i32),
     /// rclone ended with no exit code, for example after a signal.
     Stopped,
+    /// rclone failed, and an error line names a dead network.
+    Offline,
 }
 
 const PROGRAM: &str = "rclone";
@@ -69,6 +71,7 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     }
     let outcome = match child.wait().ok().and_then(|status| status.code()) {
         Some(0) => Outcome::Success,
+        _ if tail.iter().any(|line| is_network_error(line)) => Outcome::Offline,
         Some(code) => Outcome::Failed(code),
         None => Outcome::Stopped,
     };
@@ -82,6 +85,50 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         outcome,
         tail: tail.into(),
     });
+}
+
+/// Asks the remote for its top folders while the daemon is offline. The call
+/// reads no file, so it costs almost nothing. Any answer except a dead network
+/// counts as online, because the next run then reports the real error, for
+/// example a bad token, instead of the probe hiding it.
+pub fn probe(cfg: &Config, events: &Sender<Event>) {
+    let answer = Command::new(PROGRAM)
+        .args([
+            "lsd",
+            "--max-depth",
+            "1",
+            "--contimeout",
+            "10s",
+            "--timeout",
+            "10s",
+        ])
+        .args(["--low-level-retries", "1", "--retries", "1"])
+        .arg(config::target(&cfg.remote))
+        .stdout(Stdio::null())
+        .output();
+    let offline = answer.is_ok_and(|out| {
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .filter_map(parse_error)
+            .any(|text| is_network_error(&text))
+    });
+    let _ = events.send(Event::Probed { online: !offline });
+}
+
+/// Returns true when the error text names a dead network. The words come from
+/// the system call and from the Go resolver, which rclone prints unchanged. A
+/// refused connection is not on the list, because a server that is down is not
+/// a network that is down.
+fn is_network_error(text: &str) -> bool {
+    [
+        "network is unreachable",
+        "no route to host",
+        "cannot assign requested address",
+        "i/o timeout",
+        ": lookup ",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 /// Restores the listing that a failed run left unusable.
@@ -420,6 +467,26 @@ mod tests {
     #[test]
     fn parse_progress_ignores_an_empty_line() {
         assert_eq!(parse_progress(""), None);
+    }
+
+    // The lines are the text that rclone 1.74.3 printed in a live run with no
+    // network, with a dead resolver, and against a closed port.
+    #[test]
+    fn only_a_dead_network_counts_as_offline() {
+        for text in [
+            "dial tcp 1.1.1.1:80: connect: network is unreachable",
+            "dial tcp [2606:4700:10::ac42:93f3]:80: connect: cannot assign requested address",
+            "dial tcp: lookup nonexistent.invalid: no such host",
+            "dial tcp: lookup example.com on 127.0.0.53:53: read udp: i/o timeout",
+        ] {
+            assert!(is_network_error(text), "{text} must count as offline");
+        }
+        assert!(!is_network_error(
+            "dial tcp 127.0.0.1:9: connect: connection refused"
+        ));
+        assert!(!is_network_error(
+            "Bisync aborted. Must run --resync to recover."
+        ));
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub enum Event {
     NeedsResync,
     /// The user confirmed one resync.
     Resync,
+    /// The probe of the remote ended. It is false when the network is down.
+    Probed { online: bool },
 }
 
 /// The reasons for a resync, for the user. A resync is pending only when rclone
@@ -38,6 +40,10 @@ const NO_RECORD: &str = "Nimbus has no record of a sync between this folder and 
 const MOVED: &str =
     "The folder or the remote changed, so Nimbus has no record of a sync between them.";
 const LOST: &str = "The last sync stopped before it saved its record of the files.";
+
+/// While the network is down, the engine probes the remote at this period
+/// instead of starting a run.
+const PROBE_EVERY: Duration = Duration::from_secs(30);
 
 /// The state machine of the daemon. This struct decides when a run starts and
 /// what the state reports. Every field is private, so the state cannot change
@@ -53,6 +59,11 @@ pub struct Engine {
     /// The user confirmed the pending resync. It covers one run, and the
     /// daemon forgets it on a restart, so every resync has its own answer.
     confirmed: bool,
+    /// The last run died on a dead network. The engine starts probes in place
+    /// of runs until one probe finds the network.
+    offline: bool,
+    /// The run that is active is a probe, not a sync.
+    probing: bool,
     /// Why the pending resync is needed. The state carries it in the error
     /// field, so the window can name it in the resync dialog.
     resync_reason: &'static str,
@@ -84,6 +95,8 @@ impl Engine {
             last_finish: None,
             dirty: false,
             confirmed: false,
+            offline: false,
+            probing: false,
             // A restart forgets the cause, so the reason names the fact that
             // holds for every cause.
             resync_reason: NO_RECORD,
@@ -119,7 +132,13 @@ impl Engine {
                     self.run_wanted = true;
                 }
             }
+            Event::Probed { online } => self.on_probed(online, now),
         }
+    }
+
+    /// True while the run that the last `start_run_if_due` started is a probe.
+    pub fn probing(&self) -> bool {
+        self.probing
     }
 
     /// Starts a run when one is due, and returns true when it did. The engine
@@ -139,6 +158,22 @@ impl Engine {
                 self.state.last_error = String::from(self.resync_reason);
             }
             return false;
+        }
+        // A file change or the interval cannot make a run work, so the daemon
+        // only probes. A Sync now click probes at once.
+        if self.offline {
+            let due = self.run_wanted
+                || self
+                    .last_finish
+                    .is_some_and(|at| now.duration_since(at) >= PROBE_EVERY);
+            if !due {
+                return false;
+            }
+            self.run_wanted = false;
+            self.last_change = None;
+            self.running = true;
+            self.probing = true;
+            return true;
         }
         let quiet = Duration::from_secs(self.cfg.debounce_secs);
         let interval = Duration::from_secs(self.cfg.interval_secs);
@@ -179,7 +214,11 @@ impl Engine {
         // at once instead of waiting for the next file change.
         self.run_wanted = true;
         if !self.running {
-            self.state.phase = Phase::Idle;
+            self.state.phase = if self.offline {
+                Phase::Offline
+            } else {
+                Phase::Idle
+            };
         }
     }
 
@@ -214,6 +253,22 @@ impl Engine {
         }
     }
 
+    fn on_probed(&mut self, online: bool, now: Instant) {
+        self.running = false;
+        self.probing = false;
+        self.last_finish = Some(now);
+        if !online {
+            return;
+        }
+        // The network is back, so the run that waited starts on the next turn.
+        self.offline = false;
+        self.run_wanted = true;
+        self.state.last_error = String::new();
+        if !self.cfg.paused {
+            self.state.phase = Phase::Idle;
+        }
+    }
+
     fn on_progress(&mut self, ratio: f64) {
         if !self.running {
             return;
@@ -229,6 +284,7 @@ impl Engine {
         self.running = false;
         // A confirmation covers one run. A failed resync asks again.
         self.confirmed = false;
+        self.offline = outcome == Outcome::Offline;
         self.last_finish = Some(now);
         self.state.last_run = unix;
         // The contract says the ratio is zero while the daemon is idle, and a
@@ -250,7 +306,11 @@ impl Engine {
             }
             return;
         }
-        self.state.phase = Phase::Error;
+        self.state.phase = if self.offline {
+            Phase::Offline
+        } else {
+            Phase::Error
+        };
         self.state.last_error = last_error_text(outcome, tail);
     }
 }
@@ -268,6 +328,7 @@ fn last_error_text(outcome: Outcome, tail: &[String]) -> String {
     match outcome {
         Outcome::Failed(code) => format!("rclone exited with code {code}"),
         Outcome::Stopped => String::from("rclone stopped without an exit code"),
+        Outcome::Offline => String::from("The network is down"),
         Outcome::Success => String::new(),
     }
 }
@@ -306,6 +367,51 @@ mod tests {
     fn done(engine: &mut Engine, at: Instant, outcome: Outcome, tail: &[&str]) {
         let tail = tail.iter().map(|line| String::from(*line)).collect();
         engine.on_event(Event::Finished { outcome, tail }, at, UNIX);
+    }
+
+    #[test]
+    fn a_dead_network_stops_the_runs_until_a_probe_finds_it() {
+        let mut e = engine(|cfg| cfg.debounce_secs = 3);
+        let t0 = Instant::now();
+        assert!(e.start_run_if_due(t0));
+        done(&mut e, t0, Outcome::Offline, &["dial tcp: lookup x"]);
+        assert_eq!(e.snapshot().phase, Phase::Offline);
+        assert!(!e.snapshot().last_error.is_empty());
+
+        // A file change makes no run, and the probe waits for its own timer.
+        e.on_event(Event::FileChanged, t0, UNIX);
+        assert!(!e.start_run_if_due(t0 + Duration::from_secs(10)));
+        let t1 = t0 + Duration::from_secs(31);
+        assert!(e.start_run_if_due(t1));
+        assert!(e.probing());
+        assert_eq!(e.snapshot().phase, Phase::Offline);
+
+        // A probe that finds no network keeps the engine offline.
+        e.on_event(Event::Probed { online: false }, t1, UNIX);
+        assert!(!e.start_run_if_due(t1 + Duration::from_secs(10)));
+        let t2 = t1 + Duration::from_secs(31);
+        assert!(e.start_run_if_due(t2));
+        assert!(e.probing());
+
+        // A probe that finds the network starts the run that waited.
+        e.on_event(Event::Probed { online: true }, t2, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Idle);
+        assert!(e.snapshot().last_error.is_empty());
+        assert!(e.start_run_if_due(t2));
+        assert!(!e.probing());
+        assert_eq!(e.snapshot().phase, Phase::Syncing);
+    }
+
+    #[test]
+    fn a_resume_while_offline_stays_offline() {
+        let mut e = engine(|_| {});
+        let now = Instant::now();
+        assert!(e.start_run_if_due(now));
+        done(&mut e, now, Outcome::Offline, &["no route to host"]);
+        e.on_event(Event::SetPaused(true), now, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Paused);
+        e.on_event(Event::SetPaused(false), now, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Offline);
     }
 
     #[test]

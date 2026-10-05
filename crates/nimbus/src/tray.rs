@@ -34,6 +34,7 @@ fn phase_icon(view: &View) -> &'static str {
         Some(Phase::Syncing) => "nimbus-syncing-symbolic",
         Some(Phase::Paused) => "nimbus-paused-symbolic",
         Some(Phase::Error | Phase::Resync) => "nimbus-error-symbolic",
+        Some(Phase::Offline) => "nimbus-offline-symbolic",
     }
 }
 
