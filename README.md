@@ -269,16 +269,23 @@ The tray icon and the first row of the menu both show the phase:
 | `paused` | <img src="data/icons/hicolor/scalable/apps/nimbus-paused-symbolic.svg" width="22" alt="The paused icon"> | You paused Nimbus. Later runs wait until you resume. |
 | `error` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The error icon"> | The last run failed. The line below the heading names the error. |
 | `resync` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The resync icon"> | The next run must compare every file. Click Resync, then confirm. |
-| `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | The network is down. The daemon starts no run and checks the remote every 30 seconds. The next run starts when the check works. |
+| `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | The network is down. The daemon starts no run. The next run starts when the network returns. |
 | no phase | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | No daemon answers on the bus. The window shows a Start daemon button. |
 
 The last row has no phase on the bus. No daemon runs, so nothing sends one.
 The two rows share one icon. The first row of the menu tells them apart:
 "No internet connection" or "The daemon is not running".
 
-A run that fails with a network error moves the daemon to `offline`. The error
-line shows the rclone text. A Sync now click makes the check at once. A file
-change or the interval does not start a run while the phase is `offline`.
+The daemon moves to `offline` within one second after the machine loses its
+default route, for example when you turn off Wi-Fi or pull a cable. A run that
+is active stops at once. A run that fails with a network error also moves the
+daemon to `offline`, and the error line shows the rclone text. This covers a
+router that has no connection to the internet.
+
+While the phase is `offline`, a file change or the interval does not start a
+run. When the route returns, or when a run found a dead network, the daemon
+checks the remote every 30 seconds. A Sync now click makes the check at once.
+The sync starts when the check works.
 
 The icon has no color of its own, so each desktop paints it with its own
 palette. A host that looks up an icon name in a cache needs a cache rebuild

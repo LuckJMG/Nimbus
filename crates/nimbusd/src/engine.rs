@@ -32,6 +32,10 @@ pub enum Event {
     Resync,
     /// The probe of the remote ended. It is false when the network is down.
     Probed { online: bool },
+    /// The machine lost its default route, or got one back. The route says
+    /// nothing about the internet behind it, so a route that returns starts
+    /// a probe and not a run.
+    Link { up: bool },
 }
 
 /// The reasons for a resync, for the user. A resync is pending only when rclone
@@ -44,6 +48,9 @@ const LOST: &str = "The last sync stopped before it saved its record of the file
 /// While the network is down, the engine probes the remote at this period
 /// instead of starting a run.
 const PROBE_EVERY: Duration = Duration::from_secs(30);
+
+/// The text of the error field when the link loss cut a run short.
+const NETWORK_DOWN: &str = "The network is down";
 
 /// The state machine of the daemon. This struct decides when a run starts and
 /// what the state reports. Every field is private, so the state cannot change
@@ -62,13 +69,17 @@ pub struct Engine {
     /// The last run died on a dead network. The engine starts probes in place
     /// of runs until one probe finds the network.
     offline: bool,
+    /// The machine has no default route. The engine starts no probe, because
+    /// no answer can arrive, and it stops the run that is active.
+    link_down: bool,
     /// The run that is active is a probe, not a sync.
     probing: bool,
     /// Why the pending resync is needed. The state carries it in the error
     /// field, so the window can name it in the resync dialog.
     resync_reason: &'static str,
     /// The run thread reads this flag between output lines and stops rclone
-    /// when it is set. `set_paused` is the only writer.
+    /// when it is set. The flag is true while the daemon is paused or the link
+    /// is down. `set_paused` and `on_link` are the only writers.
     pause: Arc<AtomicBool>,
 }
 
@@ -96,6 +107,7 @@ impl Engine {
             dirty: false,
             confirmed: false,
             offline: false,
+            link_down: false,
             probing: false,
             // A restart forgets the cause, so the reason names the fact that
             // holds for every cause.
@@ -133,6 +145,7 @@ impl Engine {
                 }
             }
             Event::Probed { online } => self.on_probed(online, now),
+            Event::Link { up } => self.on_link(up),
         }
     }
 
@@ -160,8 +173,12 @@ impl Engine {
             return false;
         }
         // A file change or the interval cannot make a run work, so the daemon
-        // only probes. A Sync now click probes at once.
+        // only probes. A Sync now click probes at once. With no route, no
+        // probe can succeed, so the daemon waits for the route to return.
         if self.offline {
+            if self.link_down {
+                return false;
+            }
             let due = self.run_wanted
                 || self
                     .last_finish
@@ -204,7 +221,8 @@ impl Engine {
 
     fn set_paused(&mut self, paused: bool) {
         self.cfg.paused = paused;
-        self.pause.store(paused, Ordering::Relaxed);
+        self.pause
+            .store(paused || self.link_down, Ordering::Relaxed);
         self.dirty = true;
         if paused {
             self.state.phase = Phase::Paused;
@@ -257,7 +275,7 @@ impl Engine {
         self.running = false;
         self.probing = false;
         self.last_finish = Some(now);
-        if !online {
+        if !online || self.link_down {
             return;
         }
         // The network is back, so the run that waited starts on the next turn.
@@ -269,8 +287,27 @@ impl Engine {
         }
     }
 
+    fn on_link(&mut self, up: bool) {
+        self.link_down = !up;
+        self.pause
+            .store(self.cfg.paused || self.link_down, Ordering::Relaxed);
+        if up {
+            // A route can come before the resolver, so a probe decides.
+            self.run_wanted = true;
+            return;
+        }
+        // The state changes now. The run that is active ends later, when its
+        // thread reads the flag, and `on_finished` then counts it as offline.
+        self.offline = true;
+        self.state.progress = 0.0;
+        self.state.last_error = String::new();
+        if !self.cfg.paused {
+            self.state.phase = Phase::Offline;
+        }
+    }
+
     fn on_progress(&mut self, ratio: f64) {
-        if !self.running {
+        if !self.running || self.link_down {
             return;
         }
         if whole_percent(ratio) == whole_percent(self.state.progress) {
@@ -284,7 +321,13 @@ impl Engine {
         self.running = false;
         // A confirmation covers one run. A failed resync asks again.
         self.confirmed = false;
-        self.offline = outcome == Outcome::Offline;
+        // A run that the link loss cut short is a dead network, not an error.
+        let outcome = if self.link_down && outcome != Outcome::Success {
+            Outcome::Offline
+        } else {
+            outcome
+        };
+        self.offline = self.link_down || outcome == Outcome::Offline;
         self.last_finish = Some(now);
         self.state.last_run = unix;
         // The contract says the ratio is zero while the daemon is idle, and a
@@ -295,7 +338,11 @@ impl Engine {
             return;
         }
         if outcome == Outcome::Success {
-            self.state.phase = Phase::Idle;
+            self.state.phase = if self.offline {
+                Phase::Offline
+            } else {
+                Phase::Idle
+            };
             self.state.last_error = String::new();
             if self.cfg.resync_pending {
                 // rclone keeps a listing of the last run. Without --resync the
@@ -328,7 +375,7 @@ fn last_error_text(outcome: Outcome, tail: &[String]) -> String {
     match outcome {
         Outcome::Failed(code) => format!("rclone exited with code {code}"),
         Outcome::Stopped => String::from("rclone stopped without an exit code"),
-        Outcome::Offline => String::from("The network is down"),
+        Outcome::Offline => String::from(NETWORK_DOWN),
         Outcome::Success => String::new(),
     }
 }
@@ -400,6 +447,52 @@ mod tests {
         assert!(e.start_run_if_due(t2));
         assert!(!e.probing());
         assert_eq!(e.snapshot().phase, Phase::Syncing);
+    }
+
+    #[test]
+    fn a_lost_link_shows_offline_at_once_and_stops_the_run() {
+        let mut e = engine(|cfg| cfg.debounce_secs = 3);
+        let t0 = Instant::now();
+        assert!(e.start_run_if_due(t0));
+        e.on_event(Event::Progress(0.4), t0, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Syncing);
+
+        // The phase moves before the run ends, and the run thread sees the flag.
+        e.on_event(Event::Link { up: false }, t0, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Offline);
+        assert!(e.pause_flag().load(Ordering::Relaxed));
+        e.on_event(Event::Progress(0.5), t0, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Offline);
+
+        // The killed run is not an error.
+        done(&mut e, t0, Outcome::Stopped, &[]);
+        assert_eq!(e.snapshot().phase, Phase::Offline);
+        assert_eq!(e.snapshot().last_error, NETWORK_DOWN);
+
+        // No probe runs while the route is missing, however long it takes.
+        e.on_event(Event::SyncNow, t0, UNIX);
+        assert!(!e.start_run_if_due(t0 + Duration::from_secs(300)));
+
+        // A route that returns starts one probe at once, then the sync.
+        let t1 = t0 + Duration::from_secs(301);
+        e.on_event(Event::Link { up: true }, t1, UNIX);
+        assert!(!e.pause_flag().load(Ordering::Relaxed));
+        assert!(e.start_run_if_due(t1));
+        assert!(e.probing());
+        e.on_event(Event::Probed { online: true }, t1, UNIX);
+        assert!(e.start_run_if_due(t1));
+        assert!(!e.probing());
+    }
+
+    #[test]
+    fn a_lost_link_keeps_a_pause_and_a_returned_link_keeps_it_too() {
+        let mut e = engine(|_| {});
+        let now = Instant::now();
+        e.on_event(Event::SetPaused(true), now, UNIX);
+        e.on_event(Event::Link { up: false }, now, UNIX);
+        assert_eq!(e.snapshot().phase, Phase::Paused);
+        e.on_event(Event::Link { up: true }, now, UNIX);
+        assert!(e.pause_flag().load(Ordering::Relaxed), "still paused");
     }
 
     #[test]

@@ -48,6 +48,41 @@ fn tray_is_gone(present: bool, seen: &mut bool, waited: Duration) -> bool {
     !present && (*seen || waited > TRAY_GRACE)
 }
 
+/// Returns true when a route table lists a default route. The IPv4 table has
+/// the columns `Iface Destination Gateway Flags ... Mask`, and the IPv6 table
+/// has `dest plen src splen nexthop metric refcnt use flags iface`. Flag bit 1
+/// means the route is up. The IPv6 table also holds a reject route on `lo`,
+/// which is not a way out.
+fn has_default_route(v4: &str, v6: &str) -> bool {
+    let up = |flags: &str| u32::from_str_radix(flags, 16).is_ok_and(|bits| bits & 1 == 1);
+    let v4_default = v4.lines().skip(1).any(|line| {
+        let col: Vec<&str> = line.split_whitespace().collect();
+        col.len() > 7 && col[1] == "00000000" && col[7] == "00000000" && up(col[3])
+    });
+    let v6_default = v6.lines().any(|line| {
+        let col: Vec<&str> = line.split_whitespace().collect();
+        col.len() > 9
+            && col[0].bytes().all(|byte| byte == b'0')
+            && col[1] == "00"
+            && col[9] != "lo"
+            && up(col[8])
+    });
+    v4_default || v6_default
+}
+
+/// Returns false when the machine has no default route, for example after a
+/// Wi-Fi disconnect or a cable pull. The kernel removes the route at once, so
+/// a read once per tick sees the loss within one second. A table that cannot
+/// be read says nothing about the link, so the answer is true.
+fn link_is_up() -> bool {
+    let v4 = std::fs::read_to_string("/proc/net/route");
+    let v6 = std::fs::read_to_string("/proc/net/ipv6_route");
+    if v4.is_err() && v6.is_err() {
+        return true;
+    }
+    has_default_route(&v4.unwrap_or_default(), &v6.unwrap_or_default())
+}
+
 /// Claims the bus name. Returns false when another daemon holds it, because
 /// only the user can free the name and a retry would fail the same way.
 fn claim_bus_name(conn: &zbus::blocking::Connection) -> Result<bool> {
@@ -201,6 +236,7 @@ fn serve(cfg: config::Config) -> Result<()> {
         .context("the daemon cannot reach the bus daemon")?;
     let (started, mut tray_seen) = (Instant::now(), false);
     let mut last_sent: Option<State> = None;
+    let mut link_up = true;
     loop {
         // The blocking receive must run without the lock. A property read on
         // another thread waits for this lock, and a receive holds it for a
@@ -220,12 +256,23 @@ fn serve(cfg: config::Config) -> Result<()> {
             eprintln!("nimbusd: the tray is gone, so the daemon stops");
             break;
         }
+        // The engine learns of a lost route in the same turn, so the icon
+        // does not wait for an error from rclone.
+        let up = link_is_up();
+        let link = (up != link_up).then_some(Event::Link { up });
+        if link.is_some() {
+            eprintln!(
+                "nimbusd: the network link is {}",
+                if up { "up" } else { "down" }
+            );
+        }
+        link_up = up;
         // Two file changes can arrive in the same tick. The drain applies both
         // before the engine reads the quiet time. The lock lasts for this one
         // statement.
         let turn = decide(
             &mut engine.lock().expect("the engine lock"),
-            first.into_iter().chain(rx.try_iter()),
+            first.into_iter().chain(link).chain(rx.try_iter()),
             &watching,
         );
         if let Some((cfg, probe)) = turn.run {
@@ -306,6 +353,27 @@ mod tests {
         assert!(tray_is_gone(false, &mut seen, Duration::ZERO), "tray left");
         let mut seen = false;
         assert!(tray_is_gone(false, &mut seen, TRAY_GRACE * 2), "no tray");
+    }
+
+    // The tables come from a live machine. The IPv6 table lists a reject route
+    // on `lo` with a zero destination, and that route is not a way out.
+    #[test]
+    fn a_default_route_is_a_way_out() {
+        let head = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n";
+        let lan = "wlp69s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0\n";
+        let gateway = "wlp69s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n";
+        let zero = "0".repeat(32);
+        let v6_default = format!(
+            "{zero} 00 {zero} 00 fe800000000000000000000000000001 00000258 0000000d 00000000 00000003  wlp69s0\n"
+        );
+        let v6_reject =
+            format!("{zero} 00 {zero} 00 {zero} ffffffff 00000001 00000000 00200200       lo\n");
+
+        assert!(has_default_route(&format!("{head}{lan}{gateway}"), ""));
+        assert!(!has_default_route(&format!("{head}{lan}"), ""), "lan only");
+        assert!(!has_default_route(head, &v6_reject), "reject on lo");
+        assert!(has_default_route(head, &format!("{v6_reject}{v6_default}")));
+        assert!(!has_default_route("", ""));
     }
 
     #[test]

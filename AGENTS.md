@@ -39,8 +39,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 132 tests pass today: 3 in `nimbus-ipc`, 88 in the `nimbusd`
-library, 2 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 135 tests pass today: 3 in `nimbus-ipc`, 90 in the `nimbusd`
+library, 3 in the `nimbusd` binary, and 39 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -191,8 +191,20 @@ name, for example `gi` with `Gio.bus_own_name`.
 
 ## The offline phase
 
-A run that dies on a dead network moves the engine to the phase `offline`.
-`run` in `rclone.rs` decides this from the error lines: `is_network_error`
+Two signals move the engine to the phase `offline`. The first is a lost
+default route. The loop in `nimbusd/src/main.rs` reads `/proc/net/route` and
+`/proc/net/ipv6_route` once per tick, and it sends `Event::Link` when the answer
+changes. The kernel drops the route at once, so the icon changes within one
+second. The engine sets the phase in the same turn, and it sets the flag that the
+run thread reads between output lines, so rclone stops within about one second.
+`on_finished` counts that run as offline, not as an error. A route is not the
+internet, so a returning route starts one probe, not a run. A table that cannot
+be read counts as a link that is up. The IPv6 table holds a reject route on `lo`
+with a zero destination, and `has_default_route` skips it. While the route is
+missing, the engine starts no probe, because no answer can arrive.
+
+The second signal is a run that dies on a dead network, which covers a router
+with no upstream. `run` in `rclone.rs` decides this from the error lines: `is_network_error`
 matches five texts that a live run on rclone 1.74.3 printed with no network, with
 a dead resolver, and with no address. A refused connection is not on the list,
 because a server that is down is not a network that is down. A wrong host name
@@ -206,8 +218,17 @@ the real error, for example a bad token. The gate for the resync comes first, so
 a failed resync still asks again and hides the offline phase.
 
 The tray shows the same icon for `offline` and for a missing daemon, and the
-first row of the menu tells them apart. A live run needs a failing remote, so
-put a script named `rclone` on the `PATH` of the daemon. The script prints
+first row of the menu tells them apart.
+
+A live check of the route needs no root. Run the daemon in a private network
+namespace on a private bus, with `unshare --map-user=$(id -u) --map-group=$(id -g)
+--keep-caps -n`. A mapping to uid 0, as `unshare -Urn` makes, is refused by the
+bus with "EXTERNAL rejected". Inside, add a `dummy` link and a default route,
+then delete the route and read `State`. That run showed `offline` at the first
+poll after the delete, no rclone process afterwards, and `syncing` again after
+the route returned. The resync gate holds the first run, so call `Resync` once.
+
+A live run of the error path needs a failing remote, so put a script named `rclone` on the `PATH` of the daemon. The script prints
 an `ERROR : ... network is unreachable` line and exits with 1 while a flag file
 exists, and it runs the real `rclone` otherwise. That run showed one `lsd` per
 30 seconds, no `bisync` while the flag existed, and one `bisync` after the flag
@@ -736,7 +757,7 @@ stays as a second line of defence.
 ## Design limits, not bugs
 
 - A lost connection is repaired on the next run, and only shape C costs a resync, which waits for a confirmation. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
-- A failed run waits for the next `interval_secs` before it retries, unless the failure is a dead network. Then the daemon probes every 30 seconds. See "The offline phase" above.
+- A failed run waits for the next `interval_secs` before it retries, unless the failure is a dead network. Then the daemon probes every 30 seconds, and a lost default route stops the runs within one second. See "The offline phase" above.
 - The watcher sees only the local folder. A change made from another machine arrives on `interval_secs` (default 900), not sooner.
 - `is_trigger` drops `Access` and `Any` events. rclone reads the local folder during every run, so a filter that accepts reads never stops syncing.
 - Pause does not stop a running sync. It skips later runs. The run thread checks the flag between output lines, so a pause lands within about a second.
