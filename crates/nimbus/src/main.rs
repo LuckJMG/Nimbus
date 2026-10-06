@@ -305,6 +305,11 @@ fn perform(
 ) {
     let result = match action {
         Action::SyncNow => proxy.sync_now(),
+        Action::TogglePaused
+            if matches!(*view.lock().expect("the view lock"), View::OfflinePaused) =>
+        {
+            return resume_without_daemon(proxy);
+        }
         Action::TogglePaused => {
             let next = !is_paused(&view.lock().expect("the view lock"));
             proxy.set_paused(next)
@@ -320,6 +325,20 @@ fn perform(
     };
     if let Err(err) = result {
         eprintln!("nimbus: the daemon refused the request: {err}");
+    }
+}
+
+/// Resumes a sync that was paused in an earlier session. No daemon runs, so
+/// the tray clears the flag in the file and then starts the daemon, which
+/// reads the file at start.
+fn resume_without_daemon(proxy: &NimbusProxyBlocking<'_>) {
+    let cleared = nimbusd::config::load().and_then(|mut cfg| {
+        cfg.paused = false;
+        nimbusd::config::save(&cfg)
+    });
+    match cleared {
+        Ok(()) => start_daemon(proxy),
+        Err(err) => eprintln!("nimbus: cannot resume: {err:#}"),
     }
 }
 

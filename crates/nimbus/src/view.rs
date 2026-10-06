@@ -45,7 +45,7 @@ pub enum View {
     /// Carries the reason that no daemon runs, with the fix.
     Offline(String),
     /// No daemon runs, and the config of the last session says paused. The
-    /// view reads as paused, and the window still offers to start the daemon.
+    /// view reads as paused, and Resume writes the config and starts the daemon.
     OfflinePaused,
     Ready(State),
 }
@@ -63,6 +63,13 @@ pub fn phase(view: &View) -> Option<Phase> {
 
 pub fn is_paused(view: &View) -> bool {
     phase(view) == Some(Phase::Paused)
+}
+
+/// The engine drops a Sync now request while a run is active, and a pause
+/// skips every run, so the window and the menu disable the control in both
+/// phases.
+pub fn can_sync_now(view: &View) -> bool {
+    !matches!(phase(view), Some(Phase::Syncing | Phase::Paused))
 }
 
 /// The full state text, for the tooltip. The tooltip has room for the error
@@ -123,6 +130,14 @@ mod tests {
     fn an_offline_view_with_a_saved_pause_reads_as_paused() {
         assert!(is_paused(&View::OfflinePaused));
         assert_eq!(status_name(&View::OfflinePaused), "Paused");
+    }
+
+    #[test]
+    fn sync_now_is_off_while_syncing_or_paused() {
+        assert!(can_sync_now(&ready(Phase::Idle, "")));
+        assert!(!can_sync_now(&ready(Phase::Syncing, "")));
+        assert!(!can_sync_now(&ready(Phase::Paused, "")));
+        assert!(!can_sync_now(&View::OfflinePaused));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use ksni::blocking::Handle;
 use nimbus_ipc::Phase;
 
-use crate::view::{Action, View, is_paused, phase, status_name, status_text};
+use crate::view::{Action, View, can_sync_now, is_paused, phase, status_name, status_text};
 use crate::window::{PAUSE_ICON, SETTINGS_ICON, SYNC_ICON};
 
 /// One icon file that every install ships, so its presence proves the theme
@@ -36,12 +36,6 @@ fn phase_icon(view: &View) -> &'static str {
         Some(Phase::Error | Phase::Resync) => "nimbus-error-symbolic",
         Some(Phase::Offline) => "nimbus-offline-symbolic",
     }
-}
-
-/// The engine drops a Sync now request while a run is active, so the menu
-/// disables the row.
-fn is_syncing(view: &View) -> bool {
-    phase(view) == Some(Phase::Syncing)
 }
 
 /// Builds the tooltip for the panel.
@@ -138,9 +132,9 @@ impl ksni::Tray for NimbusTray {
             MenuItem::Standard(StandardItem {
                 label: String::from("Sync now"),
                 icon_name: String::from(SYNC_ICON),
-                // The engine drops a request while a run is active, so a
-                // click on an enabled item would look broken.
-                enabled: !is_syncing(&view),
+                // The engine drops a request while a run is active or the
+                // pause holds, so a click on an enabled item would look broken.
+                enabled: can_sync_now(&view),
                 activate: self.send_on_activate(Action::SyncNow),
                 ..Default::default()
             }),
@@ -338,13 +332,6 @@ mod tests {
     fn the_error_tooltip_shows_the_daemon_text() {
         let tip = tooltip(&ready(Phase::Error, "Bisync aborted"), "x");
         assert_eq!(tip.description, "Bisync aborted");
-    }
-
-    #[test]
-    fn the_sync_state_comes_from_the_view() {
-        assert!(is_syncing(&ready(Phase::Syncing, "")));
-        assert!(!is_syncing(&ready(Phase::Idle, "")));
-        assert!(!is_syncing(&View::Offline(String::new())));
     }
 
     #[test]

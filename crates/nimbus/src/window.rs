@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, Image, Label, Orientation, ProgressBar, Window};
 
-use crate::view::{Action, View, is_paused, phase, status_name};
+use crate::view::{Action, View, can_sync_now, is_paused, phase, status_name};
 use nimbus_ipc::Phase;
 
 /// The icon names. GTK resolves them from the icon theme of the desktop for
@@ -50,7 +50,7 @@ fn bar(view: &View, now: u64) -> (f64, String) {
         }
         View::Ready(state) => (0.0, synced(state.last_run, now)),
         View::Offline(_) => (0.0, String::from("no connection")),
-        View::OfflinePaused => (0.0, String::from("daemon stopped")),
+        View::OfflinePaused => (0.0, String::new()),
     }
 }
 
@@ -143,11 +143,12 @@ impl StatusWindow {
         self.pause_icon.set_icon_name(Some(pause_icon(view)));
         // Sync and pause need a daemon, so a window with no daemon offers
         // the start button in their place.
-        let offline = matches!(view, View::Offline(_) | View::OfflinePaused);
+        let offline = matches!(view, View::Offline(_));
         // A pending resync blocks every run, so the window offers the resync
         // in place of Sync now.
         let resync = phase(view) == Some(Phase::Resync);
         self.sync.set_visible(!offline && !resync);
+        self.sync.set_sensitive(can_sync_now(view));
         self.resync.set_visible(resync);
         self.pause.set_visible(!offline);
         self.start.set_visible(offline);
