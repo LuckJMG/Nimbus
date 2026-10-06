@@ -50,6 +50,7 @@ fn bar(view: &View, now: u64) -> (f64, String) {
         }
         View::Ready(state) => (0.0, synced(state.last_run, now)),
         View::Offline(_) => (0.0, String::from("no connection")),
+        View::OfflinePaused => (0.0, String::from("daemon stopped")),
     }
 }
 
@@ -99,6 +100,7 @@ fn error_line(view: &View) -> Option<&str> {
     let text = match view {
         View::Ready(state) => &state.last_error,
         View::Offline(reason) => reason,
+        View::OfflinePaused => return None,
     };
     (!text.is_empty()).then_some(text.as_str())
 }
@@ -141,7 +143,7 @@ impl StatusWindow {
         self.pause_icon.set_icon_name(Some(pause_icon(view)));
         // Sync and pause need a daemon, so a window with no daemon offers
         // the start button in their place.
-        let offline = matches!(view, View::Offline(_));
+        let offline = matches!(view, View::Offline(_) | View::OfflinePaused);
         // A pending resync blocks every run, so the window offers the resync
         // in place of Sync now.
         let resync = phase(view) == Some(Phase::Resync);

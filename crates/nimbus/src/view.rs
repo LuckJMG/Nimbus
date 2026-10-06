@@ -44,6 +44,9 @@ pub enum Reply {
 pub enum View {
     /// Carries the reason that no daemon runs, with the fix.
     Offline(String),
+    /// No daemon runs, and the config of the last session says paused. The
+    /// view reads as paused, and the window still offers to start the daemon.
+    OfflinePaused,
     Ready(State),
 }
 
@@ -53,6 +56,7 @@ pub enum View {
 pub fn phase(view: &View) -> Option<Phase> {
     match view {
         View::Ready(state) => Some(state.phase),
+        View::OfflinePaused => Some(Phase::Paused),
         View::Offline(_) => None,
     }
 }
@@ -64,8 +68,10 @@ pub fn is_paused(view: &View) -> bool {
 /// The full state text, for the tooltip. The tooltip has room for the error
 /// message from the daemon.
 pub fn status_text(view: &View) -> String {
-    let View::Ready(state) = view else {
-        return String::from("The daemon is not running");
+    let state = match view {
+        View::Ready(state) => state,
+        View::OfflinePaused => return String::from("Paused"),
+        View::Offline(_) => return String::from("The daemon is not running"),
     };
     match state.phase {
         Phase::Idle => String::from("Idle"),
@@ -111,6 +117,12 @@ mod tests {
     #[test]
     fn an_offline_view_has_no_phase() {
         assert_eq!(phase(&View::Offline(String::new())), None);
+    }
+
+    #[test]
+    fn an_offline_view_with_a_saved_pause_reads_as_paused() {
+        assert!(is_paused(&View::OfflinePaused));
+        assert_eq!(status_name(&View::OfflinePaused), "Paused");
     }
 
     #[test]

@@ -266,7 +266,7 @@ fn run_worker(view: Arc<Mutex<View>>, start: Start) {
         }
         let next = match proxy.state() {
             Ok(state) => View::Ready(state),
-            Err(_) => View::Offline(offline_reason()),
+            Err(_) => offline_view(),
         };
         if tray::refresh(&handle, &view, next) {
             // The panel dropped the item. The window keeps working, so the
@@ -276,17 +276,21 @@ fn run_worker(view: Arc<Mutex<View>>, start: Start) {
     }
 }
 
-/// Explains why no daemon answers, and names the fix. A daemon with a bad
+/// Builds the view for a daemon that does not answer. A daemon with a bad
 /// config exits after it refuses, so the tray runs the same check to find the
-/// cause. The daemon writes a default config on its first start, and the tray
-/// never writes the file, so a missing file means the daemon never ran.
-fn offline_reason() -> String {
+/// cause and names the fix. A valid config that says `paused` gives
+/// `OfflinePaused`, because the daemon starts paused and the user paused it.
+/// The daemon writes a default config on its first start, and the tray never
+/// writes the file, so a missing file means the daemon never ran.
+fn offline_view() -> View {
     match nimbusd::config::read() {
-        Ok(Some(cfg)) => cfg
-            .check()
-            .map_or_else(|err| err.to_string(), |()| String::new()),
-        Ok(None) => String::new(),
-        Err(err) => format!("{err:#}"),
+        Ok(Some(cfg)) => match cfg.check() {
+            Err(err) => View::Offline(err.to_string()),
+            Ok(()) if cfg.paused => View::OfflinePaused,
+            Ok(()) => View::Offline(String::new()),
+        },
+        Ok(None) => View::Offline(String::new()),
+        Err(err) => View::Offline(format!("{err:#}")),
     }
 }
 
