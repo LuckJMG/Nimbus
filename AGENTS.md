@@ -39,8 +39,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 135 tests pass today: 3 in `nimbus-ipc`, 90 in the `nimbusd`
-library, 3 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 138 tests pass today: 3 in `nimbus-ipc`, 92 in the `nimbusd`
+library, 3 in the `nimbusd` binary, and 40 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -85,11 +85,10 @@ the destination and it must exist before the first run. A `remote` with a
 folder, as in `drive:/sub`, targets that folder, and it must exist too. Some remotes, for example
 Google Drive, create the folder themselves.
 
-Write the scratch config before the first start. The default `local` is
-`~/Cloud`, and on a machine where that folder exists, a first start does not
-refuse. It serves the real folder against the scratch remote. Only the resync
-gate keeps that first run from starting. Set the watched folder, the remote,
-and short timers:
+Write the scratch config before the first start. The default `remote` and
+`local` are empty, so a first start with no file writes an empty config and
+refuses it. The daemon exits with zero and the notification names the empty
+remote first. Set the watched folder, the remote, and short timers:
 
 ```console
 cat > /tmp/scratch/cfg/nimbus/config.toml <<'TOML'
@@ -435,7 +434,7 @@ busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssas" "" /tmp/scratch/local 60 3 newer delete 0
 ```
 
-The second call must fail with "The remote is empty", and the config
+The second call must fail with "There is no remote", and the config
 file must be unchanged afterwards.
 
 Then move the folder and read the log. A save that leaves `local` alone must

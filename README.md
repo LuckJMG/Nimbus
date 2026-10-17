@@ -136,9 +136,8 @@ from the repository.
 
 #### Build from the repository
 
-1. Create a remote in rclone. Name it `drive`, because the default remote
-   path in Nimbus is `drive:/`. A different name works too, if you set it in
-   the config.
+1. Create a remote in rclone. Write down its name, because you type it in the
+   Settings dialog later.
 
     ```console
     rclone config
@@ -186,8 +185,9 @@ window. A start from the app menu opens the window.
 ### Configure Nimbus
 
 The daemon reads one file, `~/.config/nimbus/config.toml`. On the first start,
-it writes the file with the default settings. While the daemon runs, it is the
-only program that writes the file.
+it writes the file with the default settings. The default `remote` and `local`
+are empty, so the daemon refuses to start until you set both. While the daemon
+runs, it is the only program that writes the file.
 
 1. Create the local folder. The daemon refuses a folder that does not exist.
 2. Open the window, and then click Settings.
@@ -204,8 +204,8 @@ config file itself, and the daemon reads the file on its next start.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remote` | `drive:/` | The rclone remote, from your rclone config. A bare name, as in `drive`, syncs the whole remote. A name with a folder, as in `drive:/Documents`, syncs that folder only. |
-| `local` | `~/Cloud` | The local folder. The daemon watches this folder. |
+| `remote` | empty | The rclone remote, from your rclone config. A bare name, as in `drive`, syncs the whole remote. A name with a folder, as in `drive:/Documents`, syncs that folder only. |
+| `local` | empty | The local folder. The daemon watches this folder. |
 | `paused` | `false` | A run that is active finishes. Later runs wait for a resume. |
 | `interval_secs` | `900` | The longest gap between two runs, counted from the end of the last run. |
 | `debounce_secs` | `30` | The quiet time after the last file change. |
@@ -390,7 +390,7 @@ The values of `ssttssas` are `remote`, `local`, `interval_secs`,
 `0` sends an empty list of flags. A refusal names the problem, for example:
 
 ```console
-Call failed: The remote is empty. Set it to an rclone remote name, for example drive.
+Call failed: There is no remote. Set it to an rclone remote name.
 ```
 
 `busctl --user monitor` does not filter by name. To watch the signal, use
@@ -429,7 +429,8 @@ daemon in the window.
 | Message | Solution |
 | --- | --- |
 | The folder … does not exist. | Create the folder. Or, in the Settings dialog, set Local folder to a folder that exists. |
-| The remote is empty. Set it to an rclone remote name, for example drive. | In the Settings dialog, set Remote path to the name of a remote from `rclone config`. |
+| There is no remote. Set it to an rclone remote name. | In the Settings dialog, set Remote path to the name of a remote from `rclone config`. |
+| There is no local folder. Set it to a folder on this computer. | In the Settings dialog, set Local folder to a folder that exists. |
 | `interval_secs` must be above zero. | Set the interval to 1 or more. The same solution applies to `debounce_secs`. |
 | Invalid config: `conflict_resolve` must be one of … | Set the key to one of the values that the message names. The same solution applies to `conflict_loser`. |
 | Invalid config: unknown field `path` … | An older build wrote this key. Click Open config file in the Settings dialog, and then delete the `path` line. |

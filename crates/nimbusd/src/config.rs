@@ -175,8 +175,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            remote: String::from("drive:/"),
-            local: LocalDir::new(Path::new("~/Cloud")),
+            remote: String::new(),
+            local: LocalDir::new(Path::new("")),
             paused: false,
             interval_secs: 900,
             debounce_secs: 30,
@@ -208,9 +208,20 @@ impl Config {
         if self.remote.is_empty() {
             return refuse(
                 Key::Remote,
-                String::from(
-                    "The remote is empty. Set it to an rclone remote name, for example drive.",
-                ),
+                String::from("There is no remote. Set it to an rclone remote name."),
+            );
+        }
+        let local = self.local.path();
+        if local.as_os_str().is_empty() {
+            return refuse(
+                Key::Local,
+                String::from("There is no local folder. Set it to a folder on this computer."),
+            );
+        }
+        if !local.is_dir() {
+            return refuse(
+                Key::Local,
+                format!("The folder {} does not exist.", local.display()),
             );
         }
         if self.interval_secs == 0 {
@@ -223,13 +234,6 @@ impl Config {
             return refuse(
                 Key::DebounceSecs,
                 String::from("debounce_secs must be above zero."),
-            );
-        }
-        let local = self.local.path();
-        if !local.is_dir() {
-            return refuse(
-                Key::Local,
-                format!("The folder {} does not exist.", local.display()),
             );
         }
         Ok(())
@@ -443,7 +447,10 @@ mod tests {
     fn the_file_keeps_the_tilde_and_the_path_drops_it() {
         let base = temp_base("tilde");
         let file = path_in(&base);
-        let cfg = Config::default();
+        let cfg = Config {
+            local: LocalDir::new(Path::new("~/Cloud")),
+            ..Config::default()
+        };
         save_to(&cfg, &file).expect("the daemon wrote the config file");
         let got = load_from(&file).expect("the daemon read the config file");
         let on_disk = std::fs::read_to_string(&file).expect("the daemon read the config file");
@@ -488,8 +495,10 @@ mod tests {
     }
 
     #[test]
-    fn a_new_config_targets_the_root_of_the_remote() {
-        assert_eq!(target(&Config::default().remote), "drive:/");
+    fn a_new_config_has_no_remote_and_no_folder() {
+        let cfg = Config::default();
+        assert_eq!(cfg.remote, "");
+        assert_eq!(cfg.local.text(), "");
     }
 
     #[test]
@@ -543,33 +552,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn check_accepts_an_existing_local_directory() {
-        let cfg = Config {
+    /// A config that passes `check`. The default holds no remote and no folder.
+    fn valid() -> Config {
+        Config {
+            remote: String::from("my-drive"),
             local: LocalDir::new(&std::env::temp_dir()),
             ..Config::default()
-        };
-        cfg.check().expect("the default config is valid");
+        }
     }
 
     #[test]
-    fn check_rejects_an_empty_remote() {
-        let cfg = Config {
-            remote: String::new(),
-            ..Config::default()
-        };
+    fn check_accepts_a_remote_and_an_existing_local_directory() {
+        valid().check().expect("the config is valid");
+    }
+
+    #[test]
+    fn check_rejects_the_new_config_for_the_remote_first() {
+        let err = Config::default()
+            .check()
+            .expect_err("a new config is empty");
+        assert_eq!(err.key, Key::Remote, "the remote comes before the folder");
         assert_eq!(
-            cfg.check().map_err(|i| i.key),
-            Err(Key::Remote),
-            "an empty remote is not usable"
+            err.reason,
+            "There is no remote. Set it to an rclone remote name."
         );
+    }
+
+    #[test]
+    fn check_rejects_an_empty_local_folder() {
+        let cfg = Config {
+            local: LocalDir::new(Path::new("")),
+            ..valid()
+        };
+        let err = cfg.check().expect_err("an empty folder is not usable");
+        assert_eq!(err.key, Key::Local);
+        assert_eq!(
+            err.reason,
+            "There is no local folder. Set it to a folder on this computer."
+        );
+    }
+
+    // The dialog lists the keys in this order, so the first error follows it.
+    #[test]
+    fn check_tests_the_folder_before_the_timers() {
+        let cfg = Config {
+            local: LocalDir::new(Path::new("/nimbus-no-such-directory")),
+            interval_secs: 0,
+            debounce_secs: 0,
+            ..valid()
+        };
+        assert_eq!(cfg.check().map_err(|i| i.key), Err(Key::Local));
     }
 
     #[test]
     fn check_rejects_a_zero_interval() {
         let cfg = Config {
             interval_secs: 0,
-            ..Config::default()
+            ..valid()
         };
         assert_eq!(
             cfg.check().map_err(|i| i.key),
@@ -582,7 +621,7 @@ mod tests {
     fn check_rejects_a_zero_debounce() {
         let cfg = Config {
             debounce_secs: 0,
-            ..Config::default()
+            ..valid()
         };
         assert_eq!(
             cfg.check().map_err(|i| i.key),
@@ -633,7 +672,7 @@ mod tests {
     fn check_rejects_a_missing_local_directory() {
         let cfg = Config {
             local: LocalDir::new(Path::new("/nimbus-no-such-directory")),
-            ..Config::default()
+            ..valid()
         };
         // The settings dialog shows the reason under the field with this key.
         assert_eq!(
