@@ -435,6 +435,10 @@ daemon in the window.
 | Invalid config: `conflict_resolve` must be one of … | Set the key to one of the values that the message names. The same solution applies to `conflict_loser`. |
 | Invalid config: unknown field `path` … | An older build wrote this key. Click Open config file in the Settings dialog, and then delete the `path` line. |
 | Invalid config: … | The config file is not valid TOML, or a key has a wrong type. Click Open config file, and then fix the line that the message names. |
+| A sync folder does not exist. Create the folder, or change it in Settings. | A run found that the local folder or the remote folder is missing. Create the folder, or set Local folder or Remote path to a folder that exists. |
+| Nimbus cannot read a folder. Change the permissions of the folder. | rclone got "permission denied" on a folder. Give your user read and write access to the synced folder. |
+| The remote is not in the rclone config. Add it with rclone config, or change the remote in Settings. | The name in Remote path is not a remote of rclone. Check the name for a typo, or run `rclone config` to add the remote. |
+| The record of the last sync is lost. The next run must be a resync. | rclone has no record of the last sync. The next run asks for a resync, so click Resync and confirm. |
 | nimbusd: another daemon already holds io.github.luckjmg.nimbus | This line is in the daemon log. Two daemons run, and only one can own the name. Stop the other daemon, and then start this one again. |
 
 In the `resync` phase, the heading reads "A resync is needed". The line below

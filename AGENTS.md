@@ -39,7 +39,7 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 140 tests pass today: 3 in `nimbus-ipc`, 94 in the `nimbusd`
+runs the same three. 146 tests pass today: 3 in `nimbus-ipc`, 100 in the `nimbusd`
 library, 3 in the `nimbusd` binary, and 40 in `nimbus`.
 
 ```console
@@ -154,6 +154,7 @@ on the assumption they are decoration.
 - Progress arrives on stderr. The command nulls stdout, so the child can never block on a full pipe.
 - `--resync` is required on the first run, after a move of the remote or the folder, and after a failure that left no listing to repair. `resync_pending` in the config tracks all three, and it clears only after a run that ends without an error. The daemon never adds the flag on its own. See "The resync gate" below.
 - `parse_error` reads `ERROR : ` and `CRITICAL: ` lines. A run that stops on a critical failure, for example a remote that is not in the rclone config, prints the reason only on a `CRITICAL:` line. Without it the tray shows "rclone exited with code 1". `NOTICE` lines stay out, because none of the live runs printed a reason on one.
+- The tray shows the last error line that is not `Bisync aborted`, because bisync prints the abort after the line that holds the reason. `user_message` in `rclone.rs` replaces the text of four known failures with a message for the user, and any other text passes unchanged. The markers are the texts of rclone 1.74.3, so a test per marker fails when a new rclone changes the wording. Add an entry to `USER_MESSAGES` for a new failure.
 - Error lines carry ANSI colour codes even in a pipe. `strip_ansi` removes them before the text reaches the tray.
 - Two lines start with `Transferred:`. Only the byte line has a percentage, and only the byte line parses.
 - The command passes `--workdir`, which points the listing at `$XDG_CONFIG_HOME/nimbus/bisync`. rclone creates the dir, so the daemon does not. The flag is also what lets `repair` find the files.

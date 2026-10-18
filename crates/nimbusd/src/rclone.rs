@@ -131,6 +131,43 @@ fn is_network_error(text: &str) -> bool {
     .any(|marker| text.contains(marker))
 }
 
+/// The texts of rclone 1.74.3 for the failures that a live run printed, and
+/// the message that the user reads in their place. A text that is not here
+/// reaches the user unchanged. A message names the error, and it names the fix
+/// only when the fix is not obvious.
+const USER_MESSAGES: [(&str, &str); 4] = [
+    (
+        "directory not found",
+        "A sync folder does not exist. Create the folder, or change it in Settings.",
+    ),
+    (
+        "permission denied",
+        "Nimbus cannot read a folder. Change the permissions of the folder.",
+    ),
+    (
+        "didn't find section in config file",
+        "The remote is not in the rclone config. Add it with rclone config, or change the remote in Settings.",
+    ),
+    (
+        "cannot find prior Path1 or Path2 listings",
+        "The record of the last sync is lost. The next run must be a resync.",
+    ),
+];
+
+/// Returns the message for the user when the error text is a known failure.
+pub fn user_message(text: &str) -> Option<&'static str> {
+    USER_MESSAGES
+        .iter()
+        .find(|(marker, _)| text.contains(marker))
+        .map(|(_, message)| *message)
+}
+
+/// Returns true for the line that bisync prints after every failure. The line
+/// holds no reason, and the reason sits on an earlier line.
+pub fn is_abort_line(text: &str) -> bool {
+    text.starts_with("Bisync aborted")
+}
+
 /// Restores the listing that a failed run left unusable.
 ///
 /// rclone keeps the listing in the working dir. A failed run replaces the good
@@ -532,6 +569,51 @@ mod tests {
                     \"drive:/\": dial tcp: lookup example.com: no such host";
         let text = parse_error(line).expect("a critical line is an error");
         assert!(is_network_error(&text));
+    }
+
+    // The lines are the text that rclone 1.74.3 printed in a live run for each
+    // failure. A change of the wording must fail here, not in the tray.
+    #[test]
+    fn each_known_failure_has_a_message_for_the_user() {
+        for (line, message) in [
+            (
+                "ERROR : Bisync critical error: directory not found",
+                USER_MESSAGES[0].1,
+            ),
+            (
+                "ERROR : Local file system at /srv/remote: error reading source root directory: directory not found",
+                USER_MESSAGES[0].1,
+            ),
+            (
+                "ERROR : failed to open directory \"\": open /srv/notes: permission denied",
+                USER_MESSAGES[1].1,
+            ),
+            (
+                "CRITICAL: Failed to create file system for destination \"nosuchremote:/\": didn't find section in config file (\"nosuchremote\")",
+                USER_MESSAGES[2].1,
+            ),
+            (
+                "ERROR : Bisync critical error: cannot find prior Path1 or Path2 listings, likely due to critical error on prior run",
+                USER_MESSAGES[3].1,
+            ),
+        ] {
+            let text = parse_error(&format!("2026/10/17 21:08:51 {line}"))
+                .expect("a known failure is an error line");
+            assert_eq!(user_message(&text), Some(message), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_failure_has_no_message() {
+        assert_eq!(user_message("couldn't connect to the remote"), None);
+    }
+
+    #[test]
+    fn the_abort_line_is_the_one_without_a_reason() {
+        assert!(is_abort_line(
+            "Bisync aborted. Must run --resync to recover."
+        ));
+        assert!(!is_abort_line("Bisync critical error: directory not found"));
     }
 
     #[test]

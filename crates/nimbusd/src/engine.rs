@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use nimbus_ipc::{Phase, Settings, State};
 
 use crate::config::Config;
-use crate::rclone::Outcome;
+use crate::rclone::{self, Outcome};
 
 /// A message for the engine. The watcher, the run thread, and the D-Bus
 /// service send these.
@@ -368,9 +368,18 @@ fn whole_percent(ratio: f64) -> u32 {
     (ratio * 100.0).round() as u32
 }
 
+/// The reason is the last line that is not the abort line, because bisync
+/// prints the abort after the line that holds the reason. A tail with only the
+/// abort line shows the abort. A known failure shows its message for the user,
+/// and any other failure shows the rclone text.
 fn last_error_text(outcome: Outcome, tail: &[String]) -> String {
-    if let Some(text) = tail.last() {
-        return text.clone();
+    let reason = tail
+        .iter()
+        .rev()
+        .find(|text| !rclone::is_abort_line(text))
+        .or(tail.last());
+    if let Some(text) = reason {
+        return rclone::user_message(text).map_or_else(|| text.clone(), String::from);
     }
     match outcome {
         Outcome::Failed(code) => format!("rclone exited with code {code}"),
@@ -865,6 +874,43 @@ mod tests {
         );
         assert_eq!(e.snapshot().last_error, "the last error");
         assert_eq!(e.snapshot().phase, Phase::Error);
+    }
+
+    const ABORT: &str = "Bisync aborted. Must run --resync to recover.";
+
+    // bisync prints the abort after the line that holds the reason.
+    #[test]
+    fn the_abort_line_never_hides_the_reason() {
+        for tail in [
+            &["Bisync critical error: boom", ABORT][..],
+            &["Bisync critical error: boom", ABORT, ABORT][..],
+        ] {
+            let mut e = engine(|_| {});
+            done(&mut e, Instant::now(), Outcome::Failed(1), tail);
+            assert_eq!(e.snapshot().last_error, "Bisync critical error: boom");
+        }
+    }
+
+    #[test]
+    fn a_tail_with_only_the_abort_line_shows_it() {
+        let mut e = engine(|_| {});
+        done(&mut e, Instant::now(), Outcome::Failed(1), &[ABORT]);
+        assert_eq!(e.snapshot().last_error, ABORT);
+    }
+
+    #[test]
+    fn a_known_failure_shows_the_message_for_the_user() {
+        let mut e = engine(|_| {});
+        done(
+            &mut e,
+            Instant::now(),
+            Outcome::Failed(1),
+            &["Bisync critical error: directory not found", ABORT],
+        );
+        assert_eq!(
+            e.snapshot().last_error,
+            "A sync folder does not exist. Create the folder, or change it in Settings."
+        );
     }
 
     #[test]
