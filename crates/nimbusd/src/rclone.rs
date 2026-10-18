@@ -236,9 +236,14 @@ fn parse_progress(line: &str) -> Option<f64> {
 }
 
 /// Reads the error text from one rclone log line. Returns nothing when the
-/// line has no error.
+/// line has no error. A `CRITICAL` line counts as an error, because rclone
+/// prints the reason for a run that stops there, for example a remote that is
+/// not in the rclone config. The level words pad differently, so each has its
+/// own marker.
 fn parse_error(line: &str) -> Option<String> {
-    let (_, rest) = line.split_once("ERROR : ")?;
+    let (_, rest) = ["ERROR : ", "CRITICAL: "]
+        .iter()
+        .find_map(|marker| line.split_once(marker))?;
     let clean = strip_ansi(rest);
     let text = clean.trim();
     (!text.is_empty()).then(|| String::from(text))
@@ -503,6 +508,30 @@ mod tests {
             parse_error(COLOR_ERROR_LINE).as_deref(),
             Some("Bisync critical error: directory not found")
         );
+    }
+
+    // The line is the text that rclone 1.74.3 printed for a remote that is not
+    // in the rclone config. The run exits with 1, and this line is the reason.
+    #[test]
+    fn parse_error_keeps_the_reason_of_a_critical_line() {
+        let line = "2026/10/17 20:57:54 CRITICAL: Failed to create file system for \
+                    destination \"nosuchremote:/\": didn't find section in config file \
+                    (\"nosuchremote\")";
+        assert_eq!(
+            parse_error(line).as_deref(),
+            Some(
+                "Failed to create file system for destination \"nosuchremote:/\": \
+                 didn't find section in config file (\"nosuchremote\")"
+            )
+        );
+    }
+
+    #[test]
+    fn a_critical_line_with_a_dead_network_counts_as_offline() {
+        let line = "2026/10/17 20:57:54 CRITICAL: Failed to create file system for \
+                    \"drive:/\": dial tcp: lookup example.com: no such host";
+        let text = parse_error(line).expect("a critical line is an error");
+        assert!(is_network_error(&text));
     }
 
     #[test]
