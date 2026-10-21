@@ -47,6 +47,36 @@ pub struct State {
     pub last_error: String,
 }
 
+/// What happened to one file in a run.
+///
+/// The derives and the zvariant attribute follow `Phase`, for the same
+/// reasons. A method reply goes through serde and not through zvariant, so the
+/// enum needs the serde attribute too. Without it, the reply spells the kind
+/// `Uploaded` and the property path spells it `uploaded`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, Value, OwnedValue)]
+#[zvariant(signature = "s", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// The file went from the local folder to the remote.
+    Uploaded,
+    /// The file came from the remote into the local folder.
+    Downloaded,
+    Deleted,
+}
+
+/// One row of the history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type, Value, OwnedValue)]
+pub struct Entry {
+    /// The file name with its extension and without its folder.
+    pub name: String,
+    /// The folder of the file inside the synced folder. The value is empty for
+    /// a file in the root.
+    pub folder: String,
+    /// The Unix time at which the daemon read the line that reported the file.
+    pub time: u64,
+    pub kind: Kind,
+}
+
 /// The keys that a client may change.
 ///
 /// The struct is not the config file of the daemon. The pause and the resync
@@ -68,6 +98,11 @@ pub struct Settings {
     pub conflict_loser: String,
     /// More rclone flags for every run, one flag or value per item.
     pub extra_flags: Vec<String>,
+    /// How long the history keeps an entry, in hours, counted from the newest
+    /// entry.
+    pub history_age_hours: u64,
+    /// The most entries that the history keeps.
+    pub history_count: u64,
 }
 
 #[proxy(
@@ -94,6 +129,13 @@ pub trait Nimbus {
     /// `resync`. A `SetSettings` call that moves the remote or the folder
     /// confirms the resync that the move needs.
     fn resync(&self) -> zbus::Result<()>;
+
+    /// Reads the history of synced files. The answer holds the entries with a
+    /// time equal to or newer than `since`, oldest first. A call with 0 returns
+    /// the whole history. The time has a resolution of one second, so a client
+    /// that asks with the time of its newest entry gets that entry again and
+    /// must drop the repeat.
+    fn get_history(&self, since: u64) -> zbus::Result<Vec<Entry>>;
 
     #[zbus(property)]
     fn state(&self) -> zbus::Result<State>;
@@ -138,6 +180,37 @@ mod tests {
     /// every value into the wrong field at runtime.
     #[test]
     fn settings_signature_is_stable() {
-        assert_eq!(Settings::SIGNATURE, "(ssttssas)");
+        assert_eq!(Settings::SIGNATURE, "(ssttssastt)");
+    }
+
+    /// A method reply serializes with serde. The kind must go on the wire as a
+    /// lowercase string, and the reply must read back unchanged.
+    #[test]
+    fn an_entry_goes_on_the_wire_with_a_lowercase_kind() {
+        use zbus::zvariant::serialized::Context;
+        use zbus::zvariant::{LE, to_bytes};
+
+        let entry = Entry {
+            name: String::from("in.txt"),
+            folder: String::from("dir"),
+            time: 100,
+            kind: Kind::Downloaded,
+        };
+        let data = to_bytes(Context::new_dbus(LE, 0), &entry).expect("the entry serializes");
+        assert!(
+            data.bytes().windows(10).any(|part| part == b"downloaded"),
+            "the kind is not a lowercase word"
+        );
+        let (back, _): (Entry, usize) = data.deserialize().expect("the entry reads back");
+        assert_eq!(back, entry);
+    }
+
+    /// The same risk holds for Entry, and a Kind that loses its attribute goes
+    /// on the wire as a u32 instead of a string.
+    #[test]
+    fn entry_signature_is_stable() {
+        assert_eq!(Entry::SIGNATURE, "(ssts)");
+        assert_eq!(Kind::SIGNATURE, "s");
+        assert_eq!(<Vec<Entry>>::SIGNATURE, "a(ssts)");
     }
 }

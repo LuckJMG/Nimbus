@@ -1,14 +1,17 @@
+mod history;
+mod rows;
 mod settings;
 mod tray;
 mod view;
 mod window;
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use gtk::glib::{ControlFlow, ExitCode, WeakRef};
@@ -16,15 +19,9 @@ use gtk::prelude::*;
 use ksni::blocking::TrayMethods;
 use nimbus_ipc::{NimbusProxyBlocking, TRAY_NAME};
 
+use history::Watch;
 use tray::NimbusTray;
 use view::{Action, Reply, View, is_paused};
-
-/// The seconds since the Unix epoch, which is the unit of `State::last_run`.
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
 
 /// The application id. GApplication uses it to hand an activation to the
 /// process that already holds the name, which keeps one icon in the panel. The
@@ -38,6 +35,9 @@ const POLL: Duration = Duration::from_secs(2);
 /// The main thread checks the window on this period, so this is the delay
 /// before a tray click brings the window up.
 const TICK: Duration = Duration::from_millis(100);
+
+/// The window rewrites the age of its rows on this period while it is open.
+const AGE_EVERY: Duration = Duration::from_secs(10);
 
 /// The daemon must answer within this time. The zbus default is 25 seconds,
 /// which would freeze the tray while the daemon stops answering.
@@ -164,7 +164,7 @@ fn first_activation(
     let window = Rc::new(window::build(app, actions.clone()));
     let dialog = settings::build(app, actions.clone());
     install_css(&WidgetExt::display(&window.root));
-    refresh_loop(view, &window, dialog, requests);
+    refresh_loop(view, &window, dialog, requests, actions.clone());
     Live {
         _hold: hold,
         window,
@@ -179,14 +179,38 @@ fn first_activation(
 /// - Adwaita dims a placeholder, but Breeze draws it in the full text color,
 ///   so an example reads as the current value. The rule fades the theme color
 ///   instead of setting one.
-/// - Breeze draws the text of a progress bar directly on the trough, so the
-///   time of the last sync touches the bar. The margin separates them.
+/// - The circle in the header takes its color from the state. The named colors
+///   come from the theme. The arrows of the syncing state turn without end.
+/// - A link button keeps the padding of a button, which makes the line of a
+///   row taller than its text. The rule takes the padding away. A folder that
+///   is gone gets a gray link.
+/// - The history shows the color of the window, and three sizes of text tell
+///   the name, the place, and the age apart. The row draws its own color, so
+///   the rule clears the row too, and a second rule gives back the hover color
+///   that says a click opens the file.
 fn install_css(display: &gtk::gdk::Display) {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(
         "window { border-radius: 0; } \
          placeholder { opacity: 0.5; } \
-         progressbar > text { margin-bottom: 4px; }",
+         .nimbus-list, .nimbus-list row { background: transparent; } \
+         .nimbus-list row:hover { background: alpha(@theme_fg_color, 0.06); } \
+         .nimbus-place { font-size: 87%; } \
+         .nimbus-when { font-size: 75%; } \
+         .nimbus-link { padding: 0; min-height: 0; min-width: 0; } \
+         .nimbus-link.nimbus-gone, .nimbus-link.nimbus-gone label { color: alpha(@theme_fg_color, 0.45); } \
+         .nimbus-badge { border-radius: 50%; } \
+         .nimbus-badge image { color: white; } \
+         .nimbus-badge.nimbus-ok { background: @success_color; } label.nimbus-ok { color: @success_color; } \
+         .nimbus-badge.nimbus-syncing { background: @theme_selected_bg_color; } label.nimbus-syncing { color: @theme_selected_bg_color; } \
+         .nimbus-badge.nimbus-error { background: @error_color; } \
+         .nimbus-badge.nimbus-warning { background: @warning_color; } label.nimbus-warning { color: @warning_color; } \
+         .nimbus-badge.nimbus-off { background: alpha(@theme_fg_color, 0.45); } label.nimbus-off { color: alpha(@theme_fg_color, 0.45); } \
+         @keyframes nimbus-spin { \
+             from { -gtk-icon-transform: rotate(0deg); } \
+             to { -gtk-icon-transform: rotate(360deg); } \
+         } \
+         .nimbus-syncing image { animation: nimbus-spin 1.5s linear infinite; }",
     );
     gtk::style_context_add_provider_for_display(
         display,
@@ -206,6 +230,7 @@ fn refresh_loop(
     window: &Rc<window::StatusWindow>,
     dialog: settings::SettingsDialog,
     requests: Receiver<Reply>,
+    actions: Sender<Action>,
 ) {
     // A window outlives the timer only if the host keeps it. A weak reference
     // lets the timer find out instead of assuming.
@@ -213,25 +238,47 @@ fn refresh_loop(
     weak_root.set(Some(&window.root));
     let view = Arc::clone(view);
     let window = Rc::clone(window);
+    let mut shown = false;
+    let mut aged = Instant::now();
     gtk::glib::timeout_add_local(TICK, move || {
+        // The worker polls the history only while the window is open, so it
+        // hears about each change once.
+        let now_shown = window.root.is_visible();
+        if now_shown != shown {
+            shown = now_shown;
+            let _ = actions.send(Action::WindowShown(shown));
+        }
+        // A hidden window does no work. The first snapshot after an open
+        // writes the ages too.
+        if now_shown && aged.elapsed() >= AGE_EVERY {
+            aged = Instant::now();
+            window.refresh_ages();
+        }
         while let Ok(reply) = requests.try_recv() {
-            deliver(reply, &weak_root, &dialog);
+            deliver(reply, &weak_root, &window, &dialog);
         }
         let current = view.lock().expect("the view lock").clone();
-        window.apply(&current, unix_now());
+        window.apply(&current);
         ControlFlow::Continue
     });
 }
 
 /// Carries out one reply from the worker. Every reply except `Show` belongs
 /// to the dialog.
-fn deliver(reply: Reply, window: &WeakRef<gtk::Window>, dialog: &settings::SettingsDialog) {
+fn deliver(
+    reply: Reply,
+    window: &WeakRef<gtk::Window>,
+    status: &window::StatusWindow,
+    dialog: &settings::SettingsDialog,
+) {
     match reply {
         Reply::Show => {
             if let Some(root) = window.upgrade() {
                 root.present();
             }
         }
+        // The rows of the window come with the drawing step.
+        Reply::History(snapshot) => status.receive_history(snapshot),
         other => dialog.receive(other),
     }
 }
@@ -251,6 +298,7 @@ fn run_worker(view: Arc<Mutex<View>>, start: Start) {
         eprintln!("nimbus: the tray cannot register with the desktop");
         return;
     };
+    let mut watch = Watch::default();
     loop {
         // A menu click wakes the loop at once, and the timeout is the poll
         // period. Sleeping instead would make every click wait up to two
@@ -262,12 +310,13 @@ fn run_worker(view: Arc<Mutex<View>>, start: Start) {
         }
         batch.extend(actions.try_iter());
         for action in batch {
-            perform(action, &proxy, &view, &show);
+            perform(action, &proxy, &view, &show, &mut watch);
         }
         let next = match proxy.state() {
             Ok(state) => View::Ready(state),
             Err(_) => offline_view(),
         };
+        refresh_history(&mut watch, &proxy, &show, matches!(next, View::Ready(_)));
         if tray::refresh(&handle, &view, next) {
             // The panel dropped the item. The window keeps working, so the
             // process stays up and a panel reload brings the icon back.
@@ -302,6 +351,7 @@ fn perform(
     proxy: &NimbusProxyBlocking<'_>,
     view: &Arc<Mutex<View>>,
     show: &Sender<Reply>,
+    watch: &mut Watch,
 ) {
     let result = match action {
         Action::SyncNow => proxy.sync_now(),
@@ -309,6 +359,12 @@ fn perform(
             if matches!(*view.lock().expect("the view lock"), View::OfflinePaused) =>
         {
             return resume_without_daemon(proxy);
+        }
+        // With no daemon, the pause slot offers to start the daemon.
+        Action::TogglePaused
+            if matches!(*view.lock().expect("the view lock"), View::Offline(_)) =>
+        {
+            return start_daemon(proxy);
         }
         Action::TogglePaused => {
             let next = !is_paused(&view.lock().expect("the view lock"));
@@ -319,12 +375,48 @@ fn perform(
             return;
         }
         Action::OpenSettings => return open_settings(proxy, show),
-        Action::StartDaemon => return start_daemon(proxy),
         Action::Resync => proxy.resync(),
         Action::SaveSettings(keys) => return save_settings(keys, proxy, show),
+        Action::WindowShown(shown) => return watch.set_shown(shown),
     };
     if let Err(err) = result {
         eprintln!("nimbus: the daemon refused the request: {err}");
+    }
+}
+
+/// Asks the daemon for the history while the window is open, and sends the
+/// window a snapshot when it needs one. A daemon that does not answer leaves the
+/// window with no rows, because old rows can make a stopped sync look healthy.
+/// The settings come first, because the trim and the folder of the rows need
+/// them. A view that is not ready skips both calls, because the state call
+/// already failed and each more call could wait for the full timeout.
+fn refresh_history(
+    watch: &mut Watch,
+    proxy: &NimbusProxyBlocking<'_>,
+    show: &Sender<Reply>,
+    ready: bool,
+) {
+    if !watch.is_shown() {
+        return;
+    }
+    let asked = if ready {
+        proxy.get_settings().and_then(|keys| {
+            let fresh = proxy.get_history(watch.since())?;
+            Ok((fresh, keys))
+        })
+    } else {
+        Err(zbus::Error::Unsupported)
+    };
+    let snapshot = match asked {
+        Ok((fresh, keys)) => {
+            let local = nimbusd::config::LocalDir::new(Path::new(&keys.local)).path();
+            let count = usize::try_from(keys.history_count).unwrap_or(usize::MAX);
+            watch.update(fresh, local, count)
+        }
+        Err(_) => watch.lost(),
+    };
+    if let Some(snapshot) = snapshot {
+        let _ = show.send(Reply::History(snapshot));
     }
 }
 

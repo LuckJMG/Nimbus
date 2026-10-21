@@ -1,13 +1,16 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+
+use nimbus_ipc::{Entry, Kind};
 
 use crate::config::{self, Config};
-use crate::engine::Event;
+use crate::engine::{Event, unix_now};
+use crate::history::History;
 
 /// How a run ended. The cases reach the tray as different words, so the
 /// run thread names them once instead of passing a bare exit code around.
@@ -31,8 +34,9 @@ const TAIL: usize = 10;
 
 /// Runs rclone once. The function blocks until the run ends, so the caller
 /// runs it on its own thread. It reads the pause flag between output lines,
-/// and it stops the process within about one second.
-pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
+/// and it stops the process within about one second. Each file line goes into
+/// the history as it arrives, and the history is pruned when the run ends.
+pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>, history: &Mutex<History>) {
     // A run that died before it finished leaves the listing unusable, and rclone
     // answers such a run with "Must run --resync to recover." The repair runs
     // first, so this run finds the last good listing and stays incremental.
@@ -55,6 +59,7 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         }
     };
     let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL);
+    let mut transfers = Transfers::default();
     let errors = child
         .stderr
         .take()
@@ -67,6 +72,12 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
         }
         if let Some(ratio) = handle_line(&line, &mut tail) {
             let _ = events.send(Event::Progress(ratio));
+        }
+        if let Some(entry) = transfers.read(&line, unix_now()) {
+            history
+                .lock()
+                .expect("the history lock")
+                .append(entry, cfg.history_count);
         }
     }
     let outcome = match child.wait().ok().and_then(|status| status.code()) {
@@ -81,6 +92,10 @@ pub fn run(cfg: &Config, pause: Arc<AtomicBool>, events: &Sender<Event>) {
     if outcome != Outcome::Success {
         repair(&config::bisync_dir());
     }
+    history
+        .lock()
+        .expect("the history lock")
+        .prune(cfg.history_age_hours, cfg.history_count);
     let _ = events.send(Event::Finished {
         outcome,
         tail: tail.into(),
@@ -242,6 +257,135 @@ fn parse_error(line: &str) -> Option<String> {
     let clean = strip_ansi(rest);
     let text = clean.trim();
     (!text.is_empty()).then(|| String::from(text))
+}
+
+/// The ending of a file line, and what the ending says.
+enum Done {
+    Copied,
+    Deleted,
+}
+
+/// Turns the file lines of one run into entries.
+///
+/// A file line does not name the direction of a copy. A header line before the
+/// copies names it, so the direction lives here between two lines. `run` builds
+/// one value for each run, so a new run starts with no direction.
+#[derive(Default)]
+struct Transfers {
+    /// The kind that the last header named. A copy line takes it.
+    direction: Option<Kind>,
+    /// The paths from the `Queue copy` lines, by file name. A copy line takes
+    /// its direction from here when no header came before it. A normal run
+    /// prints the full path and a conflict run prints the path in the root,
+    /// so a lookup compares the end of the path.
+    queued: HashMap<String, Vec<(String, Kind)>>,
+}
+
+impl Transfers {
+    /// Reads one line of the log. Returns an entry when the line reports a file
+    /// that was copied or deleted.
+    fn read(&mut self, line: &str, unix: u64) -> Option<Entry> {
+        let text = log_text(line)?;
+        if let Some(direction) = parse_header(&text) {
+            self.direction = Some(direction);
+            return None;
+        }
+        if let Some((path, kind)) = parse_queue(&text) {
+            self.queued
+                .entry(split_path(&path).1.to_string())
+                .or_default()
+                .push((path, kind));
+            return None;
+        }
+        let (path, done) = parse_result(&text)?;
+        let kind = match done {
+            Done::Deleted => Kind::Deleted,
+            Done::Copied => self.copy_kind(path).or_else(|| {
+                eprintln!("nimbusd: no direction for the copy of {path}");
+                None
+            })?,
+        };
+        let (folder, name) = split_path(path);
+        Some(Entry {
+            name: name.to_string(),
+            folder: folder.to_string(),
+            time: unix,
+            kind,
+        })
+    }
+
+    /// A full queue path cannot tell `b.txt` in the root from `a/b.txt`, because
+    /// both end with `/b.txt`. When the paths that match name different
+    /// directions, the lookup returns nothing instead of a guess.
+    fn copy_kind(&self, path: &str) -> Option<Kind> {
+        self.direction.or_else(|| {
+            let ending = format!("/{path}");
+            let mut kinds = self
+                .queued
+                .get(split_path(path).1)?
+                .iter()
+                .filter(|(queued, _)| queued == path || queued.ends_with(&ending))
+                .map(|(_, kind)| *kind);
+            let first = kinds.next()?;
+            kinds.all(|kind| kind == first).then_some(first)
+        })
+    }
+}
+
+/// Splits a path into its folder and its file name. A path with no slash has an
+/// empty folder.
+fn split_path(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+/// Returns the message of an INFO or NOTICE line, with no color codes.
+fn log_text(line: &str) -> Option<String> {
+    let clean = strip_ansi(line);
+    let (_, text) = clean
+        .split_once("INFO  : ")
+        .or_else(|| clean.split_once("NOTICE: "))?;
+    Some(String::from(text.trim_end()))
+}
+
+/// Reads a header line. The header names the side that the next file lines
+/// write to: `Path1` is the local folder, and `Path2` is the remote. The
+/// resync prints its own words for the same fact.
+fn parse_header(text: &str) -> Option<Kind> {
+    const HEADERS: [&str; 2] = ["Do queued copies to", "Resync is copying files to"];
+    if !text.starts_with("- Path") || !HEADERS.iter().any(|header| text.contains(header)) {
+        return None;
+    }
+    match text.rsplit(' ').next()? {
+        "Path1" => Some(Kind::Downloaded),
+        "Path2" => Some(Kind::Uploaded),
+        _ => None,
+    }
+}
+
+/// Reads a `Queue copy` line. Returns the path and the direction of the copy.
+fn parse_queue(text: &str) -> Option<(String, Kind)> {
+    let rest = text.strip_prefix("- Path")?;
+    let (_, rest) = rest.split_once("Queue copy to Path")?;
+    let kind = match rest.chars().next()? {
+        '1' => Kind::Downloaded,
+        '2' => Kind::Uploaded,
+        _ => return None,
+    };
+    let (_, path) = rest.split_once("- ")?;
+    Some((String::from(path), kind))
+}
+
+/// Reads a line that reports one file. Returns the path and the result. The
+/// line ends with the result, so a file name that holds a colon stays whole.
+/// A line that reports only a new time, a rename, or a folder is not a result.
+fn parse_result(text: &str) -> Option<(&str, Done)> {
+    [
+        (": Copied (new)", Done::Copied),
+        (": Copied (replaced existing)", Done::Copied),
+        (": Deleted", Done::Deleted),
+    ]
+    .into_iter()
+    .find_map(|(ending, done)| Some((text.strip_suffix(ending)?, done)))
 }
 
 // ponytail: this function removes CSI sequences only. rclone does not emit
@@ -642,5 +786,187 @@ mod tests {
         let mut tail = VecDeque::new();
         assert_eq!(handle_line(BYTE_LINE, &mut tail), Some(0.05));
         assert!(tail.is_empty(), "a progress line must not reach the tray");
+    }
+
+    // The lines in these tests come from rclone 1.74.3 runs on a scratch
+    // folder. The header is the only line that names the direction of a copy.
+    const TO_LOCAL: &str = "- Path2    Do queued copies to                - Path1";
+    const TO_REMOTE: &str = "- Path1    Do queued copies to                - Path2";
+    // The resync header has other words and carries color codes in a pipe.
+    const RESYNC_TO_LOCAL: &str = "- \x1b[34mPath2\x1b[0m    \x1b[35mResync is copying files to\x1b[0m         - \x1b[36mPath1\x1b[0m";
+
+    fn info(text: &str) -> String {
+        format!("2026/10/18 15:03:30 INFO  : {text}")
+    }
+
+    /// Feeds the texts of INFO lines to one parser, as one run does.
+    fn entries(texts: &[&str]) -> Vec<(Kind, String, String)> {
+        let mut transfers = Transfers::default();
+        texts
+            .iter()
+            .filter_map(|text| transfers.read(&info(text), 100))
+            .map(|entry| (entry.kind, entry.folder, entry.name))
+            .collect()
+    }
+
+    fn entry(kind: Kind, folder: &str, name: &str) -> (Kind, String, String) {
+        (kind, String::from(folder), String::from(name))
+    }
+
+    #[test]
+    fn a_header_sets_the_direction_of_the_copies_after_it() {
+        assert_eq!(
+            entries(&[
+                TO_LOCAL,
+                "new-remote.txt: Copied (new)",
+                TO_REMOTE,
+                "new-local.txt: Copied (new)",
+                "dir/in.txt: Copied (replaced existing)",
+            ]),
+            [
+                entry(Kind::Downloaded, "", "new-remote.txt"),
+                entry(Kind::Uploaded, "", "new-local.txt"),
+                entry(Kind::Uploaded, "dir", "in.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_resync_header_sets_the_direction_too() {
+        assert_eq!(
+            entries(&[RESYNC_TO_LOCAL, "a/b/c.txt: Copied (new)"]),
+            [entry(Kind::Downloaded, "a/b", "c.txt")]
+        );
+    }
+
+    // The conflict loser is deleted before any header of the run.
+    #[test]
+    fn a_delete_needs_no_header() {
+        assert_eq!(
+            entries(&["seed.txt: Deleted"]),
+            [entry(Kind::Deleted, "", "seed.txt")]
+        );
+    }
+
+    // A new time, a rename, a folder, and the lines around the files make no
+    // entry.
+    #[test]
+    fn other_lines_make_no_entry() {
+        assert!(
+            entries(&[
+                TO_REMOTE,
+                "renamed.txt: Updated modification time in destination",
+                "seed.txt: Moved (server-side) to: seed.txt.conflict1",
+                "dir: Set directory modification time (using DirSetModTime)",
+                "- Path2    Queue delete              - /tmp/x/remote/seed.txt",
+                "- Path1    File was deleted          - del-local.txt",
+                "There was nothing to transfer",
+                "Bisync successful",
+            ])
+            .is_empty()
+        );
+        let mut transfers = Transfers::default();
+        assert!(transfers.read(BYTE_LINE, 100).is_none());
+        assert!(transfers.read(&error("x: Copied (new)"), 100).is_none());
+    }
+
+    // The line ends with the result, so a colon in the name stays in the name.
+    #[test]
+    fn a_name_with_a_colon_stays_whole() {
+        assert_eq!(
+            entries(&[TO_REMOTE, "notes/a: b.txt: Copied (new)"]),
+            [entry(Kind::Uploaded, "notes", "a: b.txt")]
+        );
+    }
+
+    #[test]
+    fn the_entry_takes_the_time_that_the_caller_passes() {
+        let mut transfers = Transfers::default();
+        let line = info("seed.txt: Deleted");
+        assert_eq!(transfers.read(&line, 42).map(|entry| entry.time), Some(42));
+    }
+
+    // A normal run prints the full path in the queue line.
+    #[test]
+    fn a_queue_line_resolves_a_copy_with_no_header() {
+        assert_eq!(
+            entries(&[
+                "- Path1    Queue copy to Path2       - /tmp/x/remote/dir/in.txt",
+                "- Path2    Queue copy to Path1       - /tmp/x/local/other/down.txt",
+                "dir/in.txt: Copied (new)",
+                "other/down.txt: Copied (new)",
+            ]),
+            [
+                entry(Kind::Uploaded, "dir", "in.txt"),
+                entry(Kind::Downloaded, "other", "down.txt"),
+            ]
+        );
+    }
+
+    // A conflict run prints the path in the root, with no folder in front.
+    #[test]
+    fn a_relative_queue_line_resolves_a_copy_too() {
+        assert_eq!(
+            entries(&[
+                "- Path2    Queue copy to Path1       - seed.txt",
+                "seed.txt: Copied (new)",
+            ]),
+            [entry(Kind::Downloaded, "", "seed.txt")]
+        );
+    }
+
+    // The end of the path must match whole folder names, so `xa/b.txt` does not
+    // match `/a/b.txt`.
+    #[test]
+    fn the_queue_lookup_matches_whole_folders() {
+        assert!(
+            entries(&[
+                "- Path1    Queue copy to Path2       - /tmp/x/remote/a/b.txt",
+                "xa/b.txt: Copied (new)",
+            ])
+            .is_empty()
+        );
+    }
+
+    // Both queue paths end with `/b.txt`, and the two copies go in different
+    // directions. The lookup cannot tell the files apart, so the root file makes
+    // no entry. The file in the folder has a longer ending and still resolves.
+    #[test]
+    fn a_queue_lookup_with_two_directions_makes_no_entry() {
+        assert_eq!(
+            entries(&[
+                "- Path1    Queue copy to Path2       - /tmp/x/remote/a/b.txt",
+                "- Path2    Queue copy to Path1       - /tmp/x/local/b.txt",
+                "b.txt: Copied (new)",
+                "a/b.txt: Copied (new)",
+            ]),
+            [entry(Kind::Uploaded, "a", "b.txt")]
+        );
+    }
+
+    // The header wins over the queue lines, and a copy that neither source
+    // resolves makes no entry, so the history never shows a wrong direction.
+    #[test]
+    fn a_copy_with_no_direction_makes_no_entry() {
+        assert!(entries(&["seed.txt: Copied (new)"]).is_empty());
+        assert_eq!(
+            entries(&[
+                "- Path1    Queue copy to Path2       - /tmp/x/remote/seed.txt",
+                TO_LOCAL,
+                "seed.txt: Copied (new)",
+            ]),
+            [entry(Kind::Downloaded, "", "seed.txt")]
+        );
+    }
+
+    // `run` builds one parser for each run. The new parser holds nothing from
+    // the run before.
+    #[test]
+    fn a_new_run_starts_with_no_direction() {
+        let mut first = Transfers::default();
+        first.read(&info(TO_REMOTE), 100);
+        assert!(first.read(&info("a.txt: Copied (new)"), 100).is_some());
+        let mut second = Transfers::default();
+        assert!(second.read(&info("a.txt: Copied (new)"), 100).is_none());
     }
 }

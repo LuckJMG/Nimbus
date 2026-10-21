@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -8,13 +9,16 @@ use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, Button, DropDown, Entry, Label, Orientation, SpinButton, Window};
 
 use nimbus_ipc::Settings;
-use nimbusd::config::{Config, ConflictLoser, ConflictResolve, Invalid, Key, LocalDir, target};
+use nimbusd::config::{
+    Config, ConflictLoser, ConflictResolve, HISTORY_AGE_HOURS, HISTORY_COUNT, Invalid, Key,
+    LocalDir, target,
+};
 
 use crate::view::{Action, Reply};
 
-/// The largest value that a spin button takes, in seconds. The config file has
-/// no upper bound, so a value above this needs the file.
-const MOST_SECONDS: f64 = 86_400.0;
+/// The values that a timer button takes, in seconds. The config file has no
+/// upper bound, so a value above this needs the file. The daemon refuses zero.
+const SECONDS: RangeInclusive<u64> = 1..=86_400;
 
 /// The choices for `--conflict-resolve`, with the words that the dialog shows.
 /// A test holds the list equal to `ConflictResolve::ALL`.
@@ -129,8 +133,8 @@ impl Hint {
     }
 }
 
-/// The hints for remote, local, interval_secs, and debounce_secs.
-type Hints = [Hint; 4];
+/// The hints for remote, local, the two timers, and the two history keys.
+type Hints = [Hint; 6];
 
 fn show(hints: &Hints, invalid: Option<&Invalid>) {
     for hint in hints {
@@ -145,13 +149,20 @@ fn invalid(keys: &Settings) -> Option<Invalid> {
     candidate.apply(keys).and_then(|_| candidate.check()).err()
 }
 
-/// A spin button for a time in seconds. The lower bound is one, because the
-/// daemon refuses zero, and the button stops the user from typing anything
+/// A spin button for a whole number. The range is the range that `check`
+/// accepts for the key, and the button stops the user from typing anything
 /// else.
-fn seconds(value: u64) -> SpinButton {
+fn whole(value: u64, range: &RangeInclusive<u64>, page: f64) -> SpinButton {
     // The adjustment carries the range and the steps, so the button cannot be
     // typed outside it.
-    let adjust = gtk::Adjustment::new(bounded(value), 1.0, MOST_SECONDS, 1.0, 60.0, 0.0);
+    let adjust = gtk::Adjustment::new(
+        bounded(value, range),
+        *range.start() as f64,
+        *range.end() as f64,
+        1.0,
+        page,
+        0.0,
+    );
     let step = SpinButton::new(Some(&adjust), 0.0, 0);
     step.set_numeric(true);
     step
@@ -167,6 +178,8 @@ struct Fields {
     local: Entry,
     interval: SpinButton,
     debounce: SpinButton,
+    age: SpinButton,
+    count: SpinButton,
     resolve: DropDown,
     loser: DropDown,
     /// The extra rclone flags, separated by spaces.
@@ -190,6 +203,8 @@ impl Fields {
                 .split_whitespace()
                 .map(String::from)
                 .collect(),
+            history_age_hours: self.age.value().max(0.0) as u64,
+            history_count: self.count.value().max(0.0) as u64,
         }
     }
 
@@ -200,8 +215,10 @@ impl Fields {
     fn write(&self, settings: &Settings) {
         text(&self.remote, &settings.remote);
         text(&self.local, &settings.local);
-        time(&self.interval, settings.interval_secs);
-        time(&self.debounce, settings.debounce_secs);
+        number(&self.interval, settings.interval_secs, &SECONDS);
+        number(&self.debounce, settings.debounce_secs, &SECONDS);
+        number(&self.age, settings.history_age_hours, &HISTORY_AGE_HOURS);
+        number(&self.count, settings.history_count, &HISTORY_COUNT);
         select(&self.resolve, &RESOLVE, &settings.conflict_resolve);
         select(&self.loser, &LOSER, &settings.conflict_loser);
         text(&self.flags, &settings.extra_flags.join(" "));
@@ -236,18 +253,18 @@ fn text(field: &Entry, value: &str) {
     }
 }
 
-fn time(field: &SpinButton, value: u64) {
-    let value = bounded(value);
+fn number(field: &SpinButton, value: u64, range: &RangeInclusive<u64>) {
+    let value = bounded(value, range);
     if field.value() != value {
         field.set_value(value);
     }
 }
 
-/// Fits a time into the range of the button. The config file has no upper
-/// bound and the daemon refuses zero, so the button is the only limit that a
-/// value from the daemon or from the user can meet.
-fn bounded(value: u64) -> f64 {
-    value.clamp(1, MOST_SECONDS as u64) as f64
+/// Fits a value into the range of the button. A value from the config file can
+/// lie outside the range that `check` accepts, so the button is the only limit
+/// that a value from the daemon or from the user can meet.
+fn bounded(value: u64, range: &RangeInclusive<u64>) -> f64 {
+    value.clamp(*range.start(), *range.end()) as f64
 }
 
 /// A GTK clone points at the same widgets, so a button handler keeps its own
@@ -295,8 +312,8 @@ impl SettingsDialog {
                 self.refuse(&text);
                 self.root.present();
             }
-            // The status window takes this one.
-            Reply::Show => {}
+            // The status window takes these two.
+            Reply::Show | Reply::History(_) => {}
         }
     }
 }
@@ -333,8 +350,10 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> SettingsDialog 
     let fields = Fields {
         remote: Entry::new(),
         local: Entry::new(),
-        interval: seconds(start.interval_secs),
-        debounce: seconds(start.debounce_secs),
+        interval: whole(start.interval_secs, &SECONDS, 60.0),
+        debounce: whole(start.debounce_secs, &SECONDS, 60.0),
+        age: whole(start.history_age_hours, &HISTORY_AGE_HOURS, 24.0),
+        count: whole(start.history_count, &HISTORY_COUNT, 100.0),
         resolve: choice(&RESOLVE),
         loser: choice(&LOSER),
         flags: Entry::new(),
@@ -363,6 +382,8 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> SettingsDialog 
         Hint::new(Key::Local, &fields.local),
         Hint::new(Key::IntervalSecs, &fields.interval),
         Hint::new(Key::DebounceSecs, &fields.debounce),
+        Hint::new(Key::HistoryAgeHours, &fields.age),
+        Hint::new(Key::HistoryCount, &fields.count),
     ];
 
     let dialog = SettingsDialog {
@@ -395,6 +416,8 @@ pub fn build(app: &gtk::Application, actions: Sender<Action>) -> SettingsDialog 
     body.append(&dialog.hints[1].row("Local folder"));
     body.append(&dialog.hints[2].row("Interval in seconds"));
     body.append(&dialog.hints[3].row("Quiet time in seconds"));
+    body.append(&dialog.hints[4].row("Hours to keep history"));
+    body.append(&dialog.hints[5].row("Most entries to keep"));
     body.append(&row("Copy to keep on conflict", &dialog.fields.resolve));
     body.append(&row("Action for the losing copy", &dialog.fields.loser));
     body.append(&row("Extra rclone flags", &dialog.fields.flags));
@@ -586,20 +609,38 @@ mod tests {
     // The daemon refuses a zero, and the button stops below one.
     #[test]
     fn a_time_below_one_becomes_one() {
-        assert_eq!(bounded(0), 1.0);
+        assert_eq!(bounded(0, &SECONDS), 1.0);
     }
 
     // A value in the file can be above the bound. The dialog must show the
     // bound, because sending the raw value back would move it.
     #[test]
     fn a_time_above_the_bound_becomes_the_bound() {
-        assert_eq!(bounded(999_999), MOST_SECONDS);
+        assert_eq!(bounded(999_999, &SECONDS), 86_400.0);
     }
 
     #[test]
     fn a_time_in_range_stays() {
-        assert_eq!(bounded(900), 900.0);
-        assert_eq!(bounded(1), 1.0);
-        assert_eq!(bounded(86_400), MOST_SECONDS);
+        assert_eq!(bounded(900, &SECONDS), 900.0);
+        assert_eq!(bounded(1, &SECONDS), 1.0);
+        assert_eq!(bounded(86_400, &SECONDS), 86_400.0);
+    }
+
+    // The history buttons take the range of `check`, so the dialog never sends
+    // a value that the daemon refuses. Both edges must pass `check`.
+    #[test]
+    fn the_history_ranges_are_the_ranges_of_check() {
+        assert_eq!(bounded(0, &HISTORY_AGE_HOURS), 1.0);
+        assert_eq!(bounded(721, &HISTORY_AGE_HOURS), 720.0);
+        assert_eq!(bounded(0, &HISTORY_COUNT), 1.0);
+        assert_eq!(bounded(10_001, &HISTORY_COUNT), 10_000.0);
+        for (age, count) in [(1, 1), (720, 10_000)] {
+            let keys = Settings {
+                history_age_hours: age,
+                history_count: count,
+                ..keys("drive", &std::env::temp_dir().display().to_string())
+            };
+            assert!(invalid(&keys).is_none(), "{age} hours and {count} entries");
+        }
     }
 }

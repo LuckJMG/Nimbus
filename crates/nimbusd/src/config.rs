@@ -170,6 +170,28 @@ pub struct Config {
     /// A file without the key loads an empty list.
     #[serde(default)]
     pub extra_flags: Vec<String>,
+    /// How long the history keeps an entry. The age counts from the newest
+    /// entry, so a quiet day removes nothing. A file without the key loads 24.
+    #[serde(default = "default_history_age_hours")]
+    pub history_age_hours: u64,
+    /// The most entries that the history keeps. A file without the key loads
+    /// 1000.
+    #[serde(default = "default_history_count")]
+    pub history_count: u64,
+}
+
+/// The values that `check` accepts for the two history keys. Neither key takes
+/// zero, because a zero could mean no limit or no history. The upper bounds
+/// keep the list that the tray reads from growing without end.
+pub const HISTORY_AGE_HOURS: std::ops::RangeInclusive<u64> = 1..=720;
+pub const HISTORY_COUNT: std::ops::RangeInclusive<u64> = 1..=10_000;
+
+fn default_history_age_hours() -> u64 {
+    24
+}
+
+fn default_history_count() -> u64 {
+    1000
 }
 
 impl Default for Config {
@@ -184,6 +206,8 @@ impl Default for Config {
             conflict_resolve: ConflictResolve::default(),
             conflict_loser: ConflictLoser::default(),
             extra_flags: Vec::new(),
+            history_age_hours: default_history_age_hours(),
+            history_count: default_history_count(),
         }
     }
 }
@@ -198,6 +222,8 @@ pub enum Key {
     DebounceSecs,
     ConflictResolve,
     ConflictLoser,
+    HistoryAgeHours,
+    HistoryCount,
 }
 
 impl Config {
@@ -225,6 +251,27 @@ impl Config {
                 String::from("debounce_secs must be above zero."),
             );
         }
+        for (key, name, value, range) in [
+            (
+                Key::HistoryAgeHours,
+                "history_age_hours",
+                self.history_age_hours,
+                HISTORY_AGE_HOURS,
+            ),
+            (
+                Key::HistoryCount,
+                "history_count",
+                self.history_count,
+                HISTORY_COUNT,
+            ),
+        ] {
+            if !range.contains(&value) {
+                return refuse(
+                    key,
+                    format!("{name} must be from {} to {}.", range.start(), range.end()),
+                );
+            }
+        }
         let local = self.local.path();
         if !local.is_dir() {
             return refuse(
@@ -245,6 +292,8 @@ impl Config {
             conflict_resolve: String::from(self.conflict_resolve.as_str()),
             conflict_loser: String::from(self.conflict_loser.as_str()),
             extra_flags: self.extra_flags.clone(),
+            history_age_hours: self.history_age_hours,
+            history_count: self.history_count,
         }
     }
 
@@ -282,6 +331,8 @@ impl Config {
         self.conflict_resolve = conflict_resolve;
         self.conflict_loser = conflict_loser;
         self.extra_flags = settings.extra_flags.clone();
+        self.history_age_hours = settings.history_age_hours;
+        self.history_count = settings.history_count;
         Ok(moved)
     }
 }
@@ -331,6 +382,15 @@ pub fn default_file() -> PathBuf {
 /// files by pattern instead of building rclone's own file name.
 pub fn bisync_dir() -> PathBuf {
     config_home().join("nimbus").join("bisync")
+}
+
+/// The file that holds the history of synced files.
+///
+/// The file is data that the daemon creates, so it lives in the XDG state dir
+/// and not in the config dir. A scratch run sets `XDG_STATE_HOME`, or it writes
+/// into the real state dir.
+pub fn history_file() -> PathBuf {
+    state_home().join("nimbus").join("history")
 }
 
 /// Writes a new file when the file does not exist. Only the daemon calls
@@ -398,6 +458,15 @@ fn expand_tilde(raw: &Path) -> PathBuf {
         Some(home) => Path::new(&home).join(rest),
         None => raw.to_path_buf(),
     }
+}
+
+fn state_home() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| Path::new(&home).join(".local").join("state"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
 }
 
 fn config_home() -> PathBuf {
@@ -470,6 +539,8 @@ mod tests {
             conflict_resolve: ConflictResolve::Path2,
             conflict_loser: ConflictLoser::Num,
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
+            history_age_hours: 48,
+            history_count: 250,
         };
         save_to(&want, &file).expect("the daemon wrote the config file");
         let got = load_from(&file).expect("the daemon read the config file");
@@ -540,6 +611,8 @@ mod tests {
         assert!(cfg.extra_flags.is_empty());
         assert_eq!(cfg.conflict_resolve, ConflictResolve::Newer);
         assert_eq!(cfg.conflict_loser, ConflictLoser::Delete);
+        assert_eq!(cfg.history_age_hours, 24);
+        assert_eq!(cfg.history_count, 1000);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -589,6 +662,64 @@ mod tests {
             Err(Key::DebounceSecs),
             "a zero debounce starts a run for every file change"
         );
+    }
+
+    // Zero could mean no limit or no history, so neither key takes it. The
+    // upper bound keeps the list that the tray reads from growing without end.
+    #[test]
+    fn check_keeps_the_history_keys_inside_their_bounds() {
+        let local = LocalDir::new(&std::env::temp_dir());
+        let with = |age, count| Config {
+            local: local.clone(),
+            history_age_hours: age,
+            history_count: count,
+            ..Config::default()
+        };
+        for (age, count) in [(1, 1), (720, 10_000)] {
+            with(age, count).check().expect("the bounds are valid");
+        }
+        for age in [0, 721] {
+            assert_eq!(
+                with(age, 1000).check().map_err(|i| i.key),
+                Err(Key::HistoryAgeHours)
+            );
+        }
+        for count in [0, 10_001] {
+            assert_eq!(
+                with(24, count).check().map_err(|i| i.key),
+                Err(Key::HistoryCount)
+            );
+        }
+        let reason = with(0, 1000).check().expect_err("zero is refused").reason;
+        assert_eq!(reason, "history_age_hours must be from 1 to 720.");
+    }
+
+    // The dialog and the file fallback both go through `settings` and `apply`,
+    // so the two keys must travel both ways.
+    #[test]
+    fn apply_copies_the_history_keys() {
+        let mut cfg = settled();
+        let next = Settings {
+            history_age_hours: 72,
+            history_count: 500,
+            ..settings()
+        };
+        cfg.apply(&next).expect("the keys are valid");
+        assert_eq!((cfg.history_age_hours, cfg.history_count), (72, 500));
+        assert_eq!(cfg.settings(), next);
+    }
+
+    // `apply` copies a value out of range, and `check` refuses it. The service
+    // and the dialog run both, so the refusal names the key.
+    #[test]
+    fn a_history_key_out_of_range_is_refused_after_apply() {
+        let mut cfg = settled();
+        let zero = Settings {
+            history_count: 0,
+            ..settings()
+        };
+        let refused = cfg.apply(&zero).and_then(|_| cfg.check());
+        assert_eq!(refused.map_err(|i| i.key), Err(Key::HistoryCount));
     }
 
     // The wire carries the conflict values as text, so `apply` refuses an
@@ -652,6 +783,8 @@ mod tests {
             conflict_resolve: String::from("path1"),
             conflict_loser: String::from("pathname"),
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
+            history_age_hours: 48,
+            history_count: 250,
         }
     }
 
@@ -668,6 +801,8 @@ mod tests {
             conflict_resolve: ConflictResolve::Newer,
             conflict_loser: ConflictLoser::Delete,
             extra_flags: vec![String::from("--drive-skip-shortcuts")],
+            history_age_hours: 48,
+            history_count: 250,
         }
     }
 

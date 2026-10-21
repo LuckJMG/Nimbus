@@ -1,11 +1,18 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nimbus_ipc::{Phase, Settings, State};
 
 use crate::config::Config;
 use crate::rclone::Outcome;
+
+/// The seconds since the Unix epoch, which is the unit of `State::last_run`.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
 
 /// A message for the engine. The watcher, the run thread, and the D-Bus
 /// service send these.
