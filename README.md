@@ -17,8 +17,9 @@ keep a local folder in sync with any rclone remote on Linux. Sync the whole
 remote, or one folder in it. A daemon runs `rclone bisync` on a schedule and
 after each file change. A tray icon shows the state and takes your commands.
 
-Nimbus helps you see the sync at a glance. The window shows the phase, the
-progress, the time since the last run, and the last error.
+Nimbus helps you see the sync at a glance. The window shows the state in one
+line, and below it the files that Nimbus synced last. Each row names the
+file, the folder, and the time since the sync.
 
 Nimbus recovers from most rclone errors. A change of network, a lost
 connection, or a shutdown in the middle of a sync needs no action from you.
@@ -213,6 +214,16 @@ config file itself, and the daemon reads the file on its next start.
 | `conflict_resolve` | `newer` | The copy that wins when a file changed on both sides: `none`, `newer`, `older`, `larger`, `smaller`, `path1` (local), or `path2` (remote). `none` keeps both copies. |
 | `conflict_loser` | `delete` | What happens to the copy that lost. `num` renames it with the next free number, as in `name.conflict1`. `pathname` renames it with the number of its origin: `name.conflict1` is local and `name.conflict2` is remote. `delete` removes it for good. With `none`, no copy loses, so rclone keeps both. |
 | `extra_flags` | `[]` | More rclone flags for every run, for example `["--drive-skip-shortcuts", "--drive-acknowledge-abuse"]` for a Google Drive remote. |
+| `history_age_hours` | `24` | How long the daemon keeps a synced file in its history. The age counts from the newest entry, so a quiet day removes nothing. The value is from 1 to 720. |
+| `history_count` | `1000` | The most entries that the history keeps. The value is from 1 to 10000. |
+
+A daemon from before the history keys refuses a config file that holds them.
+Delete the two history lines to go back to that daemon.
+
+The daemon writes the history of synced files to `nimbus/history` in the state
+dir, which is `$XDG_STATE_HOME` or `~/.local/state`. Each line holds the time, the
+kind, the folder, and the name, split by tabs. The daemon drops a line that it
+cannot read, and every line after it, when it starts.
 
 Nimbus passes a `remote` with a colon to rclone unchanged. On a `local`
 remote, `name:path` and `name:/path` are different folders, so write the
@@ -257,8 +268,16 @@ On Wayland, a left click brings the window to the front only when the window
 is closed. A window that is open keeps its place, because the compositor
 refuses a raise without a click of its own. The taskbar entry flashes instead.
 
-The window shows the phase, the progress, the time since the last run, and
-the last error. Each button shows only when it applies.
+The window shows the state in one line, with a colored circle: green for
+`idle`, blue for `syncing` with the progress, orange for `resync`, red for
+`error`, and gray for `paused`, `offline`, and no daemon. Below the line, a
+list shows the files that the daemon uploaded, downloaded, or deleted. The
+newest file comes first. Click the folder link in a row to open that folder.
+Click the row to open the file. A click on a program or on a `.desktop` file
+opens its folder and selects the file, so a click never starts a program. A folder that does not exist anymore shows as
+gray text. The time reads "just now", then minutes, then hours, and then
+"yesterday". An older file shows the date in the format of the desktop. The
+list holds the number of entries that `history_count` sets.
 
 The tray icon and the first row of the menu both show the phase:
 
@@ -267,7 +286,7 @@ The tray icon and the first row of the menu both show the phase:
 | `idle` | <img src="data/icons/hicolor/scalable/apps/nimbus-idle-symbolic.svg" width="22" alt="The idle icon"> | The daemon runs and waits. No run is active. |
 | `syncing` | <img src="data/icons/hicolor/scalable/apps/nimbus-syncing-symbolic.svg" width="22" alt="The syncing icon"> | A run is active. The window shows the progress of the run. |
 | `paused` | <img src="data/icons/hicolor/scalable/apps/nimbus-paused-symbolic.svg" width="22" alt="The paused icon"> | You paused Nimbus. Later runs wait until you resume. |
-| `error` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The error icon"> | The last run failed. The line below the heading names the error. |
+| `error` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The error icon"> | The last run failed. The state line names the error. |
 | `resync` | <img src="data/icons/hicolor/scalable/apps/nimbus-error-symbolic.svg" width="22" alt="The resync icon"> | The next run must compare every file. Click Resync, then confirm. |
 | `offline` | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | The network is down. The daemon starts no run. The next run starts when the network returns. |
 | no phase | <img src="data/icons/hicolor/scalable/apps/nimbus-offline-symbolic.svg" width="22" alt="The offline icon"> | No daemon answers on the bus. The window shows a Start daemon button. |
@@ -279,7 +298,7 @@ The two rows share one icon. The first row of the menu tells them apart:
 The daemon moves to `offline` within one second after the machine loses its
 default route, for example when you turn off Wi-Fi or pull a cable. A run that
 is active stops at once. A run that fails with a network error also moves the
-daemon to `offline`, and the error line shows the rclone text. This covers a
+daemon to `offline`, and the state line shows the rclone text. This covers a
 router that has no connection to the internet.
 
 While the phase is `offline`, a file change or the interval does not start a
@@ -291,13 +310,16 @@ The icon has no color of its own, so each desktop paints it with its own
 palette. A host that looks up an icon name in a cache needs a cache rebuild
 after an install. See [Troubleshoot Nimbus](#troubleshoot-nimbus).
 
+The buttons of the window:
+
 | Button | What it does |
 | --- | --- |
-| Sync now | Starts a run. The call returns before the run finishes. |
+| Sync now | Starts a run. The call returns before the run finishes. The button is disabled while a run is active, while Nimbus is paused, and when no daemon runs. |
 | Resync | Shows in the `resync` phase only, in place of Sync now. Asks you to confirm, and then starts a resync. |
 | Pause | Skips later runs. A run that is active finishes first. The button reads Resume while Nimbus is paused. |
-| Start daemon | Shows only when the daemon does not run, in place of Sync now and Pause. Starts the systemd unit. |
-| Settings | Opens the Settings dialog. |
+| Start daemon | Shows in place of Pause when the daemon does not run. Starts the systemd unit. When the config file says paused, the button reads Resume, and a click starts the daemon without the pause. |
+| Open folder | Opens the synced folder in the file manager. The button is disabled until a daemon answers. |
+| Settings | The icon at the end of the state line. Opens the Settings dialog. |
 
 The menu has the same commands:
 
@@ -309,7 +331,7 @@ The menu has the same commands:
 | Settings | Opens the Settings dialog. |
 | Quit | Stops the tray. The daemon stops within one second. The window close button only hides the window. |
 
-The Settings dialog edits seven keys of the config file:
+The Settings dialog edits nine keys of the config file:
 
 | Field | Key |
 | --- | --- |
@@ -320,9 +342,14 @@ The Settings dialog edits seven keys of the config file:
 | Copy to keep on conflict | `conflict_resolve` |
 | Action for the losing copy | `conflict_loser` |
 | Extra rclone flags | `extra_flags` |
+| Hours to keep history | `history_age_hours` |
+| Most entries to keep | `history_count` |
 
 Type the flags on one line, with spaces between them. The two times stop at
-86400, one day. A larger value needs the file. Pause and the resync flag have
+86400, one day. A larger value needs the file. The two history fields stop at
+the bounds in the table of keys. A lower history limit removes entries when
+the next run ends. No run starts while the daemon is paused or offline, so the
+entries stay until then. Pause and the resync flag have
 no field, because the window and the menu control them.
 
 The dialog checks the keys before Save sends them. If a key is wrong, the
@@ -363,7 +390,7 @@ tray runs.
 | Object path | `/io/github/luckjmg/nimbus` |
 | Interface | `io.github.luckjmg.nimbus1` |
 | Property | `State`, signature `(sdts)` |
-| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttssas)`, `Resync` |
+| Methods | `SyncNow`, `SetPaused(b)`, `GetSettings`, `SetSettings(ssttssastt)`, `Resync`, `GetHistory(t)` |
 | Signal | `Changed(State)` |
 
 The `State` signature holds four values:
@@ -376,18 +403,27 @@ The `State` signature holds four values:
 In the `resync` phase, the daemon waits until a client calls `Resync`. The
 error string then holds the reason for the resync.
 
+`GetHistory(t)` returns the history of synced files as `a(ssts)`. Each entry
+holds the file name, the folder inside the synced folder, the Unix time, and
+the kind: `uploaded`, `downloaded`, or `deleted`. The answer holds the entries
+with a time equal to or newer than the argument, oldest first, and the argument
+`0` returns all of them. The time has a resolution of one second, so a client
+that asks with the time of its newest entry gets that entry again.
+
 ```console
 busctl --user get-property io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 State
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SyncNow
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b true
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetPaused b false
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttssas drive '~/Cloud' 900 30 newer delete 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetHistory t 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings ssttssastt drive '~/Cloud' 900 30 newer delete 0 24 1000
 ```
 
-The values of `ssttssas` are `remote`, `local`, `interval_secs`,
-`debounce_secs`, `conflict_resolve`, `conflict_loser`, and `extra_flags`. The
-`0` sends an empty list of flags. A refusal names the problem, for example:
+The values of `ssttssastt` are `remote`, `local`, `interval_secs`,
+`debounce_secs`, `conflict_resolve`, `conflict_loser`, `extra_flags`,
+`history_age_hours`, and `history_count`. The first `0` sends an empty list of
+flags. A refusal names the problem, for example:
 
 ```console
 Call failed: The remote is empty. Set it to an rclone remote name, for example drive.
@@ -407,7 +443,7 @@ reports a stale state forever.
 
 ### Troubleshoot Nimbus
 
-1. Read the line below the heading in the window. It names the last error.
+1. Read the state line in the window. It names the last error.
 2. Read the daemon log.
 
     ```console
@@ -417,10 +453,9 @@ reports a stale state forever.
 
 3. Find the issue in the table below.
 
-The window shows each message below the heading. When the daemon refuses to
-start, the heading reads "The daemon is not running". The daemon then also
-sends a desktop notification, "Nimbus did not start". If Do Not Disturb is on,
-look in the notification history.
+The state line shows each message. When the daemon refuses to start, the line
+shows the reason. The daemon then also sends a desktop notification, "Nimbus
+did not start". If Do Not Disturb is on, look in the notification history.
 
 A bad config stops the daemon on purpose. The unit stays inactive and does not
 restart, because only you can fix the config. After the fix, click Start
@@ -436,9 +471,9 @@ daemon in the window.
 | Invalid config: … | The config file is not valid TOML, or a key has a wrong type. Click Open config file, and then fix the line that the message names. |
 | nimbusd: another daemon already holds io.github.luckjmg.nimbus | This line is in the daemon log. Two daemons run, and only one can own the name. Stop the other daemon, and then start this one again. |
 
-In the `resync` phase, the heading reads "A resync is needed". The line below
-it gives one of three reasons. For each reason, click Resync and confirm. The
-cost is one full pass over both sides.
+In the `resync` phase, the state line reads "A resync is needed". When you click
+Resync, the dialog gives one of three reasons. For each reason, confirm the
+dialog. The cost is one full pass over both sides.
 
 | Reason | Cause |
 | --- | --- |
@@ -450,7 +485,7 @@ Other issues:
 
 | Issue | Solution |
 | --- | --- |
-| The heading reads "Error". | Read the rclone message below the heading, and the daemon log. The daemon tries again on the next interval. |
+| The state line shows an error message. | Read the rclone message, and the daemon log. The daemon tries again on the next interval. |
 | A failed run takes a long time to retry. | A run that fails with a network error does not wait for `interval_secs`. The daemon checks the remote every 30 seconds, and it retries when the check works. Any other failed run waits for `interval_secs`. Set `interval_secs` to a low value, for example `300`, if such errors are frequent. |
 | A run on a test remote fails with "directory not found". | Create the destination folder before the first run. Some remotes, for example Google Drive, create the folder themselves. Use an `alias` remote with an absolute path. It is the only test remote that resolves the same way from any working directory. |
 | The tray shows a blank icon. | Rebuild the icon cache. See the commands below the table. |

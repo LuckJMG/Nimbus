@@ -39,8 +39,8 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 135 tests pass today: 3 in `nimbus-ipc`, 90 in the `nimbusd`
-library, 3 in the `nimbusd` binary, and 39 in `nimbus`.
+runs the same three. 193 tests pass today: 5 in `nimbus-ipc`, 119 in the `nimbusd`
+library, 3 in the `nimbusd` binary, and 66 in `nimbus`.
 
 ```console
 cargo test -p nimbusd                     # one crate
@@ -52,7 +52,8 @@ cargo test -p nimbusd --lib rclone::tests::parse_progress_reads_the_byte_line
 
 The unit tests do not cover the bus, the watcher, the panel, or rclone. Those need a
 real run. Set `XDG_CONFIG_HOME` to a scratch directory, because the daemon writes a
-config file on first start.
+config file on first start. Set `XDG_STATE_HOME` to a scratch directory too, or the
+daemon writes its history into the real state dir.
 
 Start the tray within 60 seconds of the daemon, or the daemon stops. See "The
 tray owns the daemon" below.
@@ -115,7 +116,7 @@ on the debounce, so a manual run looks broken.
 
 ```console
 cargo build --workspace
-XDG_CONFIG_HOME=/tmp/scratch/cfg RCLONE_CONFIG=/tmp/scratch/cfg/rclone.conf ./target/debug/nimbusd &
+XDG_CONFIG_HOME=/tmp/scratch/cfg XDG_STATE_HOME=/tmp/scratch/state RCLONE_CONFIG=/tmp/scratch/cfg/rclone.conf ./target/debug/nimbusd &
 ./target/debug/nimbus &
 
 busctl --user introspect io.github.luckjmg.nimbus /io/github/luckjmg/nimbus
@@ -133,7 +134,18 @@ dbus-monitor --session "type='signal',interface='io.github.luckjmg.nimbus1'"
 The window needs a display. `spectacle -b -n -o shot.png` takes one screenshot on
 KDE, and `pgrep -a nimbus` confirms that a second instance of the tray exits
 instead of adding a second icon. The README links `docs/screenshot.png`, so
-replace that file when a change moves anything in the window.
+replace that file when a change moves anything in the window. `spectacle -b -n
+-a -o` captures the active window, and the file has a transparent margin for the
+shadow. Crop it to the opaque part. Seed the history file with made-up names,
+because the image is public.
+
+Five traps from the runs on a private bus:
+
+- `spectacle` fails on a private bus. Save `DBUS_SESSION_BUS_ADDRESS` before `dbus-run-session`, and set the saved value for the `spectacle` call only.
+- Stop a test daemon or tray by PID. `pkill -x nimbusd` also kills the installed daemon, and `pkill -f` with a pattern that appears in your own command line kills your own shell.
+- A pipe after `dbus-run-session` hangs. Send the output to a file, and read `/dev/null` as the input.
+- Run `cargo build --workspace` before the run. `clippy` does not build the binaries, so a run can use an old binary.
+- The dev machine has no tool for keys or the mouse. To scroll the list, add a temporary timer that sets the `value` of the adjustment, and remove it after the run.
 
 The listing lives in `$XDG_CONFIG_HOME/nimbus/bisync`, because `rclone.rs` passes
 `--workdir`. Before that flag existed the listing stayed in the rclone cache dir,
@@ -156,6 +168,11 @@ on the assumption they are decoration.
 - `--resync` is required on the first run, after a move of the remote or the folder, and after a failure that left no listing to repair. `resync_pending` in the config tracks all three, and it clears only after a run that ends without an error. The daemon never adds the flag on its own. See "The resync gate" below.
 - Error lines carry ANSI colour codes even in a pipe. `strip_ansi` removes them before the text reaches the tray.
 - Two lines start with `Transferred:`. Only the byte line has a percentage, and only the byte line parses.
+- `Transfers` in `rclone.rs` turns the file lines into history entries. A copy line, `X: Copied (new)` or `X: Copied (replaced existing)`, does not name the direction. The header before it does. `- Path2    Do queued copies to    - Path1` means a download, and the same line with the paths swapped means an upload. `Path1` is the local folder.
+- A resync prints `Resync is copying files to` in place of that header, and the line carries color codes. `Transfers` strips them first.
+- A `Deleted` line needs no header. The loser of a conflict prints one before any header of the run. A line for `Updated modification time`, `Moved (server-side)`, or a folder makes no entry.
+- With no header, the `Queue copy to PathN` lines give the direction. A normal run prints a full path there, and a conflict run prints a path in the root. A lookup that finds two directions for one file name makes no entry, and so does a copy with no direction at all. The daemon logs the second case.
+- The line shapes come from rclone 1.74.3 and the `alias` remote. Measure them again for a cloud remote before you trust the fallback.
 - The command passes `--workdir`, which points the listing at `$XDG_CONFIG_HOME/nimbus/bisync`. rclone creates the dir, so the daemon does not. The flag is also what lets `repair` find the files.
 - Do not add `--recover` or `--resilient`. A live run measured both. Neither one restores a lost listing, and `--resilient` prints "retryable without --resync" and then fails on the next run anyway.
 
@@ -349,6 +366,65 @@ rclone deletes the losing copy. A live run on rclone 1.74.3 confirmed it. With
 `name.conflict2`, and both copies survive on both sides, even when
 `conflict_loser` is `delete`.
 
+## The history
+
+`history.rs` keeps the list of synced files, and `rclone::run` feeds it. See
+"rclone" above for the lines that become entries. The file is
+`$XDG_STATE_HOME/nimbus/history`, and `history_file` in `config.rs` builds the
+path. The state dir is the place for data that the program creates, and the
+config dir holds only what the user edits.
+
+One line holds one entry: the time, the kind, the folder, and the name, split by
+tabs. A line is complete only when it ends with a newline. `append` sends the
+whole line in one `write_all` call, so a crash leaves either the full line or a
+line with no newline. `open` drops the first bad line and every line after it,
+and then rewrites the file. A last line with no newline counts as bad, even when
+it parses, because a cut name can look whole.
+
+Four rules hold the design together. A test covers each one.
+
+- `append` turns a tab or a newline in the name or the folder into a space before it stores the entry. The list and the file then hold the same text, and the line keeps four fields.
+- The list drops its oldest entry at once when it passes `history_count`. The file waits for `prune`, which `run` calls after rclone ends. The age counts from the newest entry.
+- `rewrite` writes a second file, calls `sync_all`, and renames it over the first. A write into the file itself empties it first, and a crash then loses the history. Without `sync_all`, a power cut can leave an empty file.
+- After a rename, the open append handle points to the replaced file. `rewrite` drops the handle, and the next append opens the file again.
+
+`GetHistory(since)` in `service.rs` returns the entries with a time equal to or
+newer than `since`, in file order, and it locks the history and not the engine.
+The time has a resolution of one second, so a strict compare loses an entry that
+arrives in the same second as the newest entry that a client holds. A client asks
+with the time of its newest entry, or a little earlier, and removes the repeats.
+A whole-entry compare finds them, because one file is copied once in a run.
+
+A method reply goes through serde and not through zvariant. `Kind` therefore needs
+`#[serde(rename_all = "lowercase")]` next to the zvariant attribute, and
+`Entry` needs `Deserialize` for the proxy. Without the serde attribute, the reply
+spells the kind `Uploaded`. `an_entry_goes_on_the_wire_with_a_lowercase_kind`
+holds this.
+
+A lower limit takes effect when the next run ends, because `run` prunes with the
+config that it received at its start. No run starts while the daemon is paused or
+offline, so the entries stay until a run starts. The dialog gives no warning, and
+the tray follows `history_count` itself.
+
+Neither limit accepts zero. A zero could mean no limit or no history, and the upper
+bounds keep the list that the tray reads from growing without end. A failed write
+goes to stderr once, and the sync goes on, because a full disk must not stop it.
+
+The tray side is in `nimbus/src/history.rs`. The worker asks only while the window
+is open. The timer of `refresh_loop` sends `Action::WindowShown` when `is_visible`
+changes. On each poll, `Watch::since` gives the time of the newest held entry minus
+`OVERLAP`, which is 2 seconds. `merge` drops the repeats, puts the newest first,
+and cuts the list to `history_count`, which comes from `GetSettings`. An open
+starts from zero, because the daemon can drop an entry by age while the window is
+hidden. A lost daemon sends one empty snapshot. The window gets a `Snapshot` only
+when the list, the folder, or the count moved, or on the first answer after an
+open.
+
+The live check of this feature needs no stop of an installed daemon. Run it on a
+private bus with `dbus-run-session`, and start a process that owns `TRAY_NAME`, for
+example `gi` with `Gio.bus_own_name`. Seed at least five files. A run that deletes
+every file stops with "too many deletes".
+
 ## The engine lock
 
 The blocking `recv_timeout` must stay **outside** the `engine.lock()` scope.
@@ -376,13 +452,13 @@ dialog.
 
 Four traps, all hit and all fixed. Read these before touching `settings.rs`.
 
-- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries six
+- `Settings` in `nimbus-ipc` is not `Config` in `nimbusd`. The wire carries eight
   primitive keys. `Config` also holds `paused` and `resync_pending`, and a client
   that wrote either one would clear a flag that keeps rclone running.
 - `LocalDir` keeps a tilde for the file and drops it for rclone. The wire field
   is a plain `String`, so `LocalDir::path()` and `LocalDir::text()` are both
   needed, and the tilde must survive a save through the dialog.
-- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttssas)`, and
+- `u64` is `t` on the wire, not `u`. The pinned signature is `(ssttssastt)`, and
   `settings_signature_is_stable` holds it.
 - `Config` carries `deny_unknown_fields`, so a file from a build that read a
   `path` key stops the daemon with an error that names the unknown field.
@@ -390,7 +466,8 @@ Four traps, all hit and all fixed. Read these before touching `settings.rs`.
   whole remote to a user who asked for one folder.
 - `Adjustment::new` takes six arguments in GTK 4, with `page_size` last. The
   spin button carries the range, so the dialog cannot send a value the daemon
-  refuses.
+  refuses. The two history buttons take `HISTORY_AGE_HOURS` and `HISTORY_COUNT`
+  from `config.rs`, so the button and `check` read one source.
 
 A moved `remote` or `local` has no bisync listing, because rclone names its
 listing after the pair of paths. So `Config::apply` raises `resync_pending`
@@ -432,7 +509,7 @@ The daemon side needs no click, so read it over the bus first:
 
 ```console
 busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 GetSettings
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssas" "" /tmp/scratch/local 60 3 newer delete 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssastt" "" /tmp/scratch/local 60 3 newer delete 0 24 1000
 ```
 
 The second call must fail with "The remote is empty", and the config
@@ -442,7 +519,7 @@ Then move the folder and read the log. A save that leaves `local` alone must
 produce no new line, and a save that moves it must name the new folder:
 
 ```console
-busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssas" drive /tmp/scratch/local2 60 3 newer delete 0
+busctl --user call io.github.luckjmg.nimbus /io/github/luckjmg/nimbus io.github.luckjmg.nimbus1 SetSettings "ssttssastt" drive /tmp/scratch/local2 60 3 newer delete 0 24 1000
 ```
 
 After that line, a file change in `/tmp/scratch/local2` must start a run, and a
@@ -454,8 +531,10 @@ file change in `/tmp/scratch/local` must not. Create `local2` first, because
 Two threads. GTK runs on the main thread, because a GTK loop must start on the
 thread that called `gtk::init`. The tray worker runs on a thread of its own,
 because the zbus blocking calls must not run inside a glib main loop. The two
-threads meet at two places only: the shared view, and a channel for the request to
-show the window.
+threads meet at three places only: the shared view, the `Action` channel from the
+window to the worker, and the `Reply` channel back. The list of the history
+travels in a `Reply`, not in the view, because the timer copies and compares the
+view ten times a second.
 
 Six traps, all hit and all fixed. Read these before touching `main.rs`.
 
@@ -465,14 +544,21 @@ Six traps, all hit and all fixed. Read these before touching `main.rs`.
 - An `activate` callback runs on a thread of the tray service. It must not block. It only sends on a channel.
 - `glib::MainContext::channel` does not exist in glib 0.22. The window is woken by one `glib::timeout_add_local` timer, which also refreshes the labels.
 - `glib::WeakRef::new()` takes no argument in glib 0.22, so the binding needs a type annotation. It returns an **empty** reference, and `upgrade` returns `None` until `set` names an object. A tray click reached the window through this reference, so every click after the first did nothing. The comments on `refresh_loop` and on `StatusWindow::root` described the intent, and the code did not follow.
-- `gtk_button_get_child` returns the label, not an internal box, on GTK 4.22. The recipe that prepends an icon into the child box adds nothing, and the button shows a text and nothing else. A live run on GTK 4.22.5 showed two plain buttons. `action_button` builds the box instead, so the icons follow the icon theme of the desktop.
+- `gtk_button_get_child` returns the label, not an internal box, on GTK 4.22. The recipe that prepends an icon into the child box adds nothing, and the button shows a text and nothing else. A live run on GTK 4.22.5 showed two plain buttons. `tile_button` builds the box instead, so the icons follow the icon theme of the desktop.
 
 ## The window
 
-The window sets no title bar. The caption comes from the desktop, either from
-KWin or from `gtk-decoration-layout` when it asks GTK to draw one. A
-`HeaderBar` puts a second heading above the state line and takes room from the
-body. Do not add one back.
+The window sets no title bar and no heading. The caption comes from the desktop,
+either from KWin or from `gtk-decoration-layout` when it asks GTK to draw one. A
+`HeaderBar`, or a name label above the state line, takes room from the list. Do
+not add one back.
+
+From top to bottom: a row with the colored circle, the state line, and the
+Settings icon, then the list of recent files, a separator, and the buttons.
+`badge` and `status_line` in `window.rs` map a view to the circle and the text.
+The size is fixed. The list area is 360 pixels high and scrolls, and the width
+follows the buttons. A label with a long text needs `set_max_width_chars`, or the
+window grows to fit the text.
 
 The error lines in the window and the dialog take the stock `error` class, so
 the theme picks the color. A live run on KDE drew it orange. Do
@@ -485,12 +571,43 @@ the theme color instead of replacing it. A GTK 4 style provider covers the
 whole display, so `install_css` in `main.rs` installs this rule and the square
 corners for both windows, next to the two `build` calls.
 
-The two buttons take their icons from the icon theme, so the names in
+The buttons take their icons from the icon theme, so the names in
 `window.rs` must exist in it. The check that matters is a live run on the
 desktop, because no unit test can see a theme. The menu sends the same names to
 Plasma, which draws them with its own icon theme. The menu row names the
 setting and keeps the pause icon, because only the window button names the
 action.
+
+The circle colors come from the named colors of the theme, such as
+`@success_color`, in the rules of `install_css`. Three traps with Breeze, all hit
+and all fixed:
+
+- A link that cannot be clicked keeps the link color. A row with a folder that is gone sets the class `nimbus-gone` for the gray.
+- A `ListBoxRow` draws its own background, so the rule that clears the list must name `.nimbus-list row` too.
+- An icon with `set_hexpand(true)` makes the box around it expand, and the circle becomes an oval. The circle box sets `set_hexpand(false)`.
+
+The list is a `ListBox` in a `ScrolledWindow`, and `rows.rs` builds each row.
+`receive_history` gets the whole list from the worker. `rows::diff` counts the
+new entries at the front. A match adds only those rows at the top and cuts the
+rows past the count. Any other case builds every row again: the first list, an
+empty old list, a moved folder, or an old newest entry that is missing. `entries`
+and `ages` must change together, because a click finds its entry by the index of
+the row.
+
+A user who scrolled down keeps the rows in view. When `value` is above `lower`,
+the code adds the measured height of the new rows to `value` right after the
+insert. It measures with `measure`, because the layout has not run yet. A live
+run showed that GTK does not clamp the new value, also when the tail is cut at
+the same time.
+
+`refresh_ages` rewrites the age of each row. The timer of `refresh_loop` calls it
+every `AGE_EVERY`, 10 seconds, while the window is visible, and `receive_history`
+calls it after each list. It sets a label only when the text differs.
+
+A click on a row opens the file with `gtk::FileLauncher`. A file with an
+executable bit, or a `.desktop` file, opens its folder instead, so a click never
+starts a program. `folder_path` keeps every path inside the synced folder,
+because a path from the daemon takes only plain parts.
 
 ## The tray raise
 
@@ -581,9 +698,10 @@ instead. Both need a hook in the SVG.
 `currentColor` alone resolves to black in a standalone file, on every desktop. A
 live run on KDE showed a black icon on a dark panel until this was fixed.
 
-The heading of the window takes `status_name`, which is the short name. The line
-below it takes the error from `state.last_error`. The tooltip takes `status_text`,
-which is the full text. Only the tooltip has the room for the message.
+The state line of the window takes `status_text`, and an error takes the message
+from `state.last_error`. The tooltip takes `status_text` too. `status_name` is
+the short name, and only the header row of the menu uses it, because a menu row
+has no room for the message.
 
 ## Packaging and releases
 
@@ -756,6 +874,8 @@ stays as a second line of defence.
 
 ## Design limits, not bugs
 
+- A tray and a daemon from different releases cannot talk about the settings, because the signature of `Settings` differs. A live run measured that an old daemon answers a new `SetSettings` with the error name `org.freedesktop.zbus.Error`. `refuse` in the tray shows words only for `InvalidArgs`, so the tray reads this as a missing daemon and writes the config file itself. A release restart pairs the two, because a tray that quits stops its daemon, so the case is rare.
+- A clock that steps back gives a new history entry an old time, and a client that asks with a later time does not get the entry until it asks from zero. The tray cannot follow the age limit, so a row can outlive its entry in the daemon, until the window starts from zero.
 - A lost connection is repaired on the next run, and only shape C costs a resync, which waits for a confirmation. The repair restores the listing, so a retry is incremental. See "A lost connection" above.
 - A failed run waits for the next `interval_secs` before it retries, unless the failure is a dead network. Then the daemon probes every 30 seconds, and a lost default route stops the runs within one second. See "The offline phase" above.
 - The watcher sees only the local folder. A change made from another machine arrives on `interval_secs` (default 900), not sooner.
@@ -766,6 +886,9 @@ stays as a second line of defence.
 - The settings dialog stops the two timers at 86400 seconds, one day. The config file has no upper bound, so a value above that needs the file. A lower bound of one exists because `check` refuses zero.
 - The daemon moves its file watcher when `local` moves, because the kernel holds the watch and the config does not. The move sits behind a comparison on the expanded path, so a settings save that left `local` alone rebuilds nothing. The comparison is the `watch` field of `Turn` in `nimbusd/src/main.rs`.
 - The panel can drop the tray item, for example on a panel reload. The tray logs the event and stays up, because the window still works. A panel reload brings the icon back.
+- A row checks its folder when the window builds it. A folder that appears or goes later keeps its look until the row is built again.
+- A list that does not continue the old one builds every row. The first fill is the worst case. A debug build took 149 ms for 1000 rows and 746 ms for 5000 rows. 10,000 rows, the upper bound of `history_count`, are not measured. `ListView` builds only the rows in view, and a `ListBox` does not. Change to it if the first fill is slow.
+- The ages move every 10 seconds, so a row can read up to 10 seconds late.
 - A tray click raises the window only while it is hidden. A visible window keeps its place, and a minimized one stays minimized. The compositor decides this, and it needs an `xdg_activation_token_v1`. The details are in "The tray raise" below.
 
 ## Comments
