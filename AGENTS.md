@@ -39,7 +39,7 @@ cargo test --workspace
 ```
 
 No CI runs these. Run all three before every commit, in that order. `just check`
-runs the same three. 193 tests pass today: 5 in `nimbus-ipc`, 119 in the `nimbusd`
+runs the same three. 203 tests pass today: 5 in `nimbus-ipc`, 129 in the `nimbusd`
 library, 3 in the `nimbusd` binary, and 66 in `nimbus`.
 
 ```console

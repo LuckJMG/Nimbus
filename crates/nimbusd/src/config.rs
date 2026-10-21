@@ -707,12 +707,10 @@ mod tests {
     // upper bound keeps the list that the tray reads from growing without end.
     #[test]
     fn check_keeps_the_history_keys_inside_their_bounds() {
-        let local = LocalDir::new(&std::env::temp_dir());
         let with = |age, count| Config {
-            local: local.clone(),
             history_age_hours: age,
             history_count: count,
-            ..Config::default()
+            ..valid()
         };
         for (age, count) in [(1, 1), (720, 10_000)] {
             with(age, count).check().expect("the bounds are valid");
@@ -754,6 +752,8 @@ mod tests {
     fn a_history_key_out_of_range_is_refused_after_apply() {
         let mut cfg = settled();
         let zero = Settings {
+            // `check` looks at the folder before the history keys.
+            local: std::env::temp_dir().to_string_lossy().into_owned(),
             history_count: 0,
             ..settings()
         };
