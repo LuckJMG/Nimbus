@@ -311,7 +311,10 @@ mod tests {
 
     #[test]
     fn the_idle_tooltip_says_idle() {
-        assert_eq!(tooltip(&ready(Phase::Idle, ""), "x").description, "Idle");
+        assert_eq!(
+            tooltip(&ready(Phase::Idle, ""), "x").description,
+            "Up to date"
+        );
     }
 
     #[test]
@@ -325,7 +328,7 @@ mod tests {
     #[test]
     fn the_syncing_tooltip_shows_the_ratio() {
         let tip = tooltip(&ready(Phase::Syncing, ""), "x");
-        assert_eq!(tip.description, "Syncing, 43%");
+        assert_eq!(tip.description, "Syncing 43%");
     }
 
     #[test]

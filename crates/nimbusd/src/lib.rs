@@ -2,5 +2,6 @@
 
 pub mod config;
 pub mod engine;
+pub mod history;
 pub mod rclone;
 pub mod service;

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -11,7 +11,8 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use nimbus_ipc::{BUS_NAME, INTERFACE, OBJECT_PATH, State, TRAY_NAME};
 
 use nimbusd::config;
-use nimbusd::engine::{Engine, Event};
+use nimbusd::engine::{Engine, Event, unix_now};
+use nimbusd::history::History;
 use nimbusd::rclone;
 use nimbusd::service::NimbusService;
 
@@ -22,13 +23,6 @@ const TICK: Duration = Duration::from_secs(1);
 /// How long the daemon waits for a tray that never appeared. The daemon starts
 /// at login, and the tray starts later from the autostart entry.
 const TRAY_GRACE: Duration = Duration::from_secs(60);
-
-/// The seconds since the Unix epoch, which is the unit of `State::last_run`.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
 
 /// Returns true when a file change must start a run.
 ///
@@ -199,6 +193,11 @@ fn main() -> Result<()> {
 }
 
 fn serve(cfg: config::Config) -> Result<()> {
+    let history = Arc::new(Mutex::new(History::open(
+        config::history_file(),
+        cfg.history_age_hours,
+        cfg.history_count,
+    )));
     let engine = Engine::new(cfg);
     let pause = engine.pause_flag();
     let engine = Arc::new(Mutex::new(engine));
@@ -206,7 +205,7 @@ fn serve(cfg: config::Config) -> Result<()> {
 
     // The daemon takes the bus name before it creates the watcher. A second
     // daemon must stop here, before it starts a run on the same folder.
-    let service = NimbusService::new(Arc::clone(&engine), tx.clone());
+    let service = NimbusService::new(Arc::clone(&engine), Arc::clone(&history), tx.clone());
     let conn = zbus::blocking::connection::Builder::session()
         .context("the daemon cannot reach the session bus")?
         .serve_at(OBJECT_PATH, service)
@@ -276,12 +275,12 @@ fn serve(cfg: config::Config) -> Result<()> {
             &watching,
         );
         if let Some((cfg, probe)) = turn.run {
-            let (tx, pause) = (tx.clone(), Arc::clone(&pause));
+            let (tx, pause, history) = (tx.clone(), Arc::clone(&pause), Arc::clone(&history));
             std::thread::spawn(move || {
                 if probe {
                     rclone::probe(&cfg, &tx);
                 } else {
-                    rclone::run(&cfg, pause, &tx);
+                    rclone::run(&cfg, pause, &tx, &history);
                 }
             });
         }

@@ -1,5 +1,7 @@
 use nimbus_ipc::{Phase, Settings, State};
 
+use crate::history::Snapshot;
+
 /// What a menu item or a button asks the tray to do. The GTK callbacks must
 /// not block, so they only send on a channel.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,10 +19,11 @@ pub enum Action {
     /// Confirms the resync that the daemon waits for. The window sends it only
     /// after the user accepted the warning.
     Resync,
-    /// Asks systemd to start the daemon, for a window that shows no daemon.
-    StartDaemon,
     /// Carries the edited keys to the worker, which owns the proxy.
     SaveSettings(Settings),
+    /// The window opened or hid. The worker asks for the history only while the
+    /// window is open, and the worker cannot read the window itself.
+    WindowShown(bool),
 }
 
 /// What the worker sends back to the GTK thread.
@@ -37,6 +40,9 @@ pub enum Reply {
     Saved,
     /// The daemon refused. The text goes in the dialog.
     Refused(String),
+    /// The list of the status window moved. The list stays out of `View`,
+    /// because the timer copies and compares the view ten times a second.
+    History(Snapshot),
 }
 
 /// What the tray shows. The daemon may not run, so the state is optional.
@@ -81,8 +87,8 @@ pub fn status_text(view: &View) -> String {
         View::Offline(_) => return String::from("The daemon is not running"),
     };
     match state.phase {
-        Phase::Idle => String::from("Idle"),
-        Phase::Syncing => format!("Syncing, {:.0}%", state.progress * 100.0),
+        Phase::Idle => String::from("Up to date"),
+        Phase::Syncing => format!("Syncing {:.0}%", state.progress * 100.0),
         Phase::Paused => String::from("Paused"),
         Phase::Resync => String::from("A resync is needed"),
         Phase::Offline => String::from("No internet connection"),
